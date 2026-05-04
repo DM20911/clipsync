@@ -1,0 +1,14 @@
+[Unit]
+Description=ClipSync clipboard sync daemon
+After=network.target graphical-session.target
+
+[Service]
+ExecStart=__NODE__ __INSTALL_DIR__/client-desktop/src/main.js
+Restart=on-failure
+RestartSec=5
+Environment=DISPLAY=:0
+StandardOutput=append:%h/.config/clipsync/client/daemon.log
+StandardError=append:%h/.config/clipsync/client/daemon.err
+
+[Install]
+WantedBy=default.target
