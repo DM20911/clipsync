@@ -3,6 +3,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import forge from 'node-forge';
 import os from 'node:os';
+import crypto from 'node:crypto';
+
+export function fingerprintOf(certPem) {
+  const der = Buffer.from(
+    String(certPem).replace(/-----[^-]+-----/g, '').replace(/\s+/g, ''),
+    'base64'
+  );
+  return crypto.createHash('sha256').update(der).digest('hex').match(/../g).join(':').toUpperCase();
+}
 
 export function ensureTlsCert(tlsDir) {
   fs.mkdirSync(tlsDir, { recursive: true });

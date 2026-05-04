@@ -1,5 +1,4 @@
-// ClipSync Hub — HTTPS + WSS + mDNS + SQLite.
-// Entry point.
+// ClipSync Hub — HTTPS + WSS + mDNS + SQLite + envelope encryption.
 import https from 'node:https';
 import { EventEmitter } from 'node:events';
 import { WebSocketServer } from 'ws';
@@ -7,15 +6,29 @@ import { WebSocketServer } from 'ws';
 import { CONFIG } from './config.js';
 import { DB } from './db.js';
 import { Auth } from './auth.js';
-import { ensureTlsCert } from './tls.js';
+import { Admin } from './admin.js';
+import { ensureTlsCert, fingerprintOf } from './tls.js';
 import { announceService } from './mdns.js';
 import { Routes } from './routes.js';
 import { log } from './logger.js';
-import { OP, isPrivateIp, isValidClip, isUrlClip, LIMITS } from '../../shared/protocol.js';
+import { TokenBucket, AttemptCounter } from './rate-limit.js';
+import { buildPerRecipient, packageHistoryRow } from './envelope.js';
+import { OP, isPrivateIp, isValidEnvelope, LIMITS } from '../../shared/protocol.js';
 
-// ── Boot
 const db   = new DB(CONFIG.DB_PATH);
 const auth = new Auth(db);
+const admin = new Admin({
+  db,
+  mode: process.env.CLIPSYNC_ADMIN_MODE || 'token',
+  password: process.env.CLIPSYNC_ADMIN_PASSWORD || null,
+});
+
+const adminTokenPrinted = admin.bootstrap();
+if (adminTokenPrinted) {
+  console.log('\n[clipsync] Admin token (save — shown once):');
+  console.log(`[clipsync]   ${adminTokenPrinted}\n`);
+}
+
 const events = new EventEmitter();
 events.setMaxListeners(50);
 
@@ -25,10 +38,15 @@ if (auth.shouldRotate()) {
 }
 
 const tls = ensureTlsCert(CONFIG.TLS_DIR);
+const certFp = fingerprintOf(tls.cert.toString());
+db.setMeta('cert_fingerprint', certFp);
+log.info('cert fingerprint', { fp: certFp });
 
-// ── Connected sockets registry. Map<deviceId, ws>
 const sockets = new Map();
-const meta    = new WeakMap();   // ws -> { deviceId, name, os, lastPong }
+const meta    = new WeakMap();
+
+const pushBucket = new TokenBucket({ capacity: 20, refillPerSec: 5 });
+const pinIpCounter = new AttemptCounter({ maxAttempts: 10, windowMs: 60_000 });
 
 function listConnected() {
   const out = [];
@@ -39,10 +57,18 @@ function listConnected() {
   return out;
 }
 
-// ── HTTPS / Routes
+function closeDevice(id, reason) {
+  const ws = sockets.get(id);
+  if (ws) try { ws.close(1008, reason); } catch {}
+  sockets.delete(id);
+}
+
+events.on('device:revoked', ({ id }) => closeDevice(id, 'revoked'));
+
 const routes = new Routes({
-  db, auth, eventBus: events,
+  db, auth, admin, eventBus: events,
   getDevices: listConnected,
+  pinIpCounter,
 });
 
 const httpServer = https.createServer(
@@ -52,12 +78,10 @@ const httpServer = https.createServer(
     if (!res.headersSent) { res.writeHead(500); res.end('internal'); }
   })
 );
-
 httpServer.listen(CONFIG.PORT_HTTP, CONFIG.HOST, () => {
   log.info('https listening', { port: CONFIG.PORT_HTTP, host: CONFIG.HOST });
 });
 
-// ── WebSocket Secure on a separate HTTPS listener
 const wssHttp = https.createServer({ key: tls.key, cert: tls.cert });
 const wss = new WebSocketServer({ server: wssHttp, maxPayload: LIMITS.FILE_MAX + (1 << 20) });
 
@@ -65,8 +89,7 @@ wss.on('connection', (ws, req) => {
   const ip = req.socket.remoteAddress || '';
   if (!isPrivateIp(ip)) {
     log.warn('rejecting non-private ws connection', { ip });
-    ws.close(1008, 'forbidden_ip');
-    return;
+    ws.close(1008, 'forbidden_ip'); return;
   }
   meta.set(ws, { authed: false });
   ws.on('message', (raw) => onMessage(ws, raw, ip));
@@ -79,22 +102,31 @@ wssHttp.listen(CONFIG.PORT_WSS, CONFIG.HOST, () => {
   log.info('wss listening', { port: CONFIG.PORT_WSS, host: CONFIG.HOST });
 });
 
-// ── Heartbeat
 setInterval(() => {
-  for (const ws of wss.clients) {
-    try { ws.ping(); } catch (_) {}
-  }
+  for (const ws of wss.clients) { try { ws.ping(); } catch {} }
 }, CONFIG.PING_INTERVAL_MS);
 
-// ── History pruning
 setInterval(() => {
   db.pruneHistory(CONFIG.HISTORY_MAX, CONFIG.HISTORY_TTL_MS);
   auth.cleanExpiredPins();
+  pushBucket.cleanup();
+  pinIpCounter.cleanup();
+  admin.cleanupSessions();
 }, 5 * 60 * 1000);
 
-// ── Message handling
-function send(ws, obj) {
-  try { ws.send(JSON.stringify(obj)); } catch (_) {}
+function send(ws, obj) { try { ws.send(JSON.stringify(obj)); } catch {} }
+
+function broadcastPeers() {
+  const list = [];
+  for (const [id, ws] of sockets) {
+    const dev = db.getDevice(id);
+    if (dev?.public_key) {
+      list.push({ id, name: dev.name, public_key: dev.public_key.toString('base64') });
+    }
+  }
+  for (const ws of sockets.values()) {
+    send(ws, { op: OP.PEERS, peers: list });
+  }
 }
 
 function onMessage(ws, raw, ip) {
@@ -104,22 +136,34 @@ function onMessage(ws, raw, ip) {
 
   const m = meta.get(ws) || {};
 
-  // Registration via PIN — initial connection from a new device
   if (msg.op === OP.REGISTER) {
-    const { pin, name, os: osName, fingerprint } = msg;
+    const ipHit = pinIpCounter.hit(ip);
+    if (!ipHit.allowed) {
+      send(ws, { op: OP.AUTH_FAIL, reason: 'rate_limited' });
+      return ws.close(1008, 'rate_limited');
+    }
+    const { pin, name, os: osName, fingerprint, public_key } = msg;
     if (!auth.consumePin(String(pin || ''))) {
       send(ws, { op: OP.AUTH_FAIL, reason: 'invalid_or_expired_pin' });
       return ws.close(1008, 'pin_failed');
     }
-    const reg = auth.registerDevice({ name, os: osName, fingerprint });
+    let pkBuf;
+    try { pkBuf = Buffer.from(String(public_key || ''), 'base64'); }
+    catch { send(ws, { op: OP.AUTH_FAIL, reason: 'invalid_public_key' }); return ws.close(1008); }
+    let reg;
+    try {
+      const isFirstAdmin = admin.mode === 'first-device' && !db.hasAnyAdmin();
+      reg = auth.registerDevice({ name, os: osName, fingerprint, publicKey: pkBuf, isAdmin: isFirstAdmin });
+    } catch (e) {
+      send(ws, { op: OP.AUTH_FAIL, reason: e.message });
+      return ws.close(1008);
+    }
     log.event('device_registered', { id: reg.id, name, ip });
     events.emit('event', { kind: 'device_registered', id: reg.id, name });
-    send(ws, { op: OP.REGISTER_OK, device_id: reg.id, token: reg.token, jwt: reg.jwt });
-    // Force re-connect with the new JWT — simpler than promoting in place.
+    send(ws, { op: OP.REGISTER_OK, device_id: reg.id, jwt: reg.jwt });
     return ws.close(1000, 'registered');
   }
 
-  // Auth handshake (every other op requires this)
   if (!m.authed) {
     if (msg.op !== OP.AUTH) {
       send(ws, { op: OP.AUTH_FAIL, reason: 'auth_required' });
@@ -131,81 +175,68 @@ function onMessage(ws, raw, ip) {
       return ws.close(1008, 'auth_failed');
     }
     const dev = result.device;
-    // Replace any existing socket for this device (single-session).
     const prev = sockets.get(dev.id);
-    if (prev && prev !== ws) {
-      try { prev.close(1000, 'replaced'); } catch {}
-    }
+    if (prev && prev !== ws) try { prev.close(1000, 'replaced'); } catch {}
     sockets.set(dev.id, ws);
     meta.set(ws, { authed: true, deviceId: dev.id, name: dev.name, os: dev.os, lastPong: Date.now() });
     db.touchDevice(dev.id);
-
+    const peers = db.listDevicePublicKeys(dev.id).map(p => ({
+      id: p.id, public_key: p.public_key.toString('base64'),
+    }));
     send(ws, {
-      op: OP.AUTH_OK,
-      device_id: dev.id,
-      devices: listConnected().filter((d) => d.id !== dev.id),
+      op: OP.AUTH_OK, device_id: dev.id,
+      devices: listConnected().filter(d => d.id !== dev.id),
+      peers,
     });
     broadcastAll({ op: OP.DEVICE_JOINED, device: { id: dev.id, name: dev.name, os: dev.os } }, dev.id);
+    broadcastPeers();
     log.event('device_connected', { id: dev.id, name: dev.name, ip });
     events.emit('event', { kind: 'device_connected', id: dev.id, name: dev.name });
     return;
   }
 
-  // Authenticated ops
   switch (msg.op) {
     case OP.PING:
       return send(ws, { op: OP.PONG, t: Date.now() });
 
     case OP.PUSH: {
+      if (!pushBucket.consume(m.deviceId, 1)) {
+        return send(ws, { op: OP.ERROR, reason: 'rate_limited' });
+      }
       const clip = msg.clip;
-      if (!isValidClip(clip)) return send(ws, { op: OP.ERROR, reason: 'invalid_clip' });
-      if (typeof clip.payload_b64 !== 'string') return send(ws, { op: OP.ERROR, reason: 'no_payload' });
+      if (!isValidEnvelope(clip)) return send(ws, { op: OP.ERROR, reason: 'invalid_clip' });
       const sizeLimit = { text: LIMITS.TEXT_MAX, url: LIMITS.TEXT_MAX, image: LIMITS.IMAGE_MAX, file: LIMITS.FILE_MAX };
       if (clip.size && clip.size > (sizeLimit[clip.type] ?? LIMITS.FILE_MAX)) {
         return send(ws, { op: OP.ERROR, reason: 'too_large' });
       }
-      // Persist (encrypted payload as-received)
-      db.insertHistory({
-        id: clip.id,
-        type: clip.type,
-        mime: clip.mime || null,
-        size: clip.size || 0,
-        source_id: m.deviceId,
-        timestamp: clip.timestamp || Date.now(),
-        checksum: clip.checksum || null,
-        payload_b64: clip.payload_b64,
-        meta_json: JSON.stringify({ name: clip.name || null }),
-      });
-      // Re-broadcast (without source — peers ignore their own)
-      const broadcast = {
-        op: OP.BROADCAST,
-        clip: {
-          id: clip.id, type: clip.type, mime: clip.mime,
-          size: clip.size, source_device: m.deviceId,
-          timestamp: clip.timestamp, checksum: clip.checksum,
-          payload_b64: clip.payload_b64,
+      const inserted = db.insertHistory({
+        id: clip.id, type: clip.type, mime: clip.mime || null, size: clip.size || 0,
+        source_id: m.deviceId, timestamp: clip.timestamp || Date.now(),
+        checksum: clip.checksum || null, payload_b64: clip.encrypted_payload,
+        meta_json: JSON.stringify({
           name: clip.name || null,
-        },
-      };
-      broadcastAll(broadcast, m.deviceId);
-      log.event('clip_pushed', {
-        id: clip.id, type: clip.type, size: clip.size,
-        from: m.deviceId, mime: clip.mime,
+          sender_ephemeral_public: clip.sender_ephemeral_public,
+          wrap_salt: clip.wrap_salt,
+          wrapped_keys: clip.wrapped_keys,
+        }),
       });
-      events.emit('event', {
-        kind: 'clip', id: clip.id, type: clip.type, size: clip.size,
-        from: m.deviceId, mime: clip.mime, timestamp: clip.timestamp,
-      });
+      if (!inserted) return send(ws, { op: OP.ERROR, reason: 'duplicate_id' });
+
+      for (const [id, peerWs] of sockets) {
+        if (id === m.deviceId) continue;
+        const out = buildPerRecipient(clip, id, m.deviceId);
+        if (out) try { peerWs.send(JSON.stringify(out)); } catch {}
+      }
+      log.event('clip_pushed', { id: clip.id, type: clip.type, size: clip.size, from: m.deviceId });
+      events.emit('event', { kind: 'clip', id: clip.id, type: clip.type, size: clip.size, from: m.deviceId, timestamp: clip.timestamp });
       return;
     }
 
     case OP.HISTORY_REQ: {
       const limit = Math.min(parseInt(msg.limit ?? 10, 10), 50);
-      const rows = db.recentHistory(limit).map((r) => ({
-        id: r.id, type: r.type, mime: r.mime, size: r.size,
-        source_device: r.source_id, timestamp: r.timestamp,
-        checksum: r.checksum, payload_b64: r.payload_b64,
-      }));
+      const rows = db.recentHistory(limit)
+        .map((r) => packageHistoryRow(r, m.deviceId))
+        .filter(Boolean);
       return send(ws, { op: OP.HISTORY, items: rows });
     }
 
@@ -218,7 +249,7 @@ function broadcastAll(obj, exceptDeviceId) {
   const json = JSON.stringify(obj);
   for (const [id, ws] of sockets) {
     if (id === exceptDeviceId) continue;
-    try { ws.send(json); } catch (_) {}
+    try { ws.send(json); } catch {}
   }
 }
 
@@ -227,16 +258,15 @@ function onClose(ws) {
   if (m && m.deviceId) {
     if (sockets.get(m.deviceId) === ws) sockets.delete(m.deviceId);
     broadcastAll({ op: OP.DEVICE_LEFT, device_id: m.deviceId });
+    broadcastPeers();
     log.event('device_disconnected', { id: m.deviceId });
     events.emit('event', { kind: 'device_disconnected', id: m.deviceId });
   }
 }
 
-// ── mDNS announce
 const mdns = announceService({
-  port: CONFIG.PORT_WSS,
-  name: CONFIG.HUB_NAME,
-  txt: { v: '1', http: String(CONFIG.PORT_HTTP) },
+  port: CONFIG.PORT_WSS, name: CONFIG.HUB_NAME,
+  txt: { v: '2', http: String(CONFIG.PORT_HTTP) },
 });
 
 log.info('clipsync hub started', {
@@ -247,7 +277,6 @@ console.log(`  Dashboard:  https://localhost:${CONFIG.PORT_HTTP}/admin`);
 console.log(`  PWA:        https://localhost:${CONFIG.PORT_HTTP}/`);
 console.log(`  WSS:        wss://localhost:${CONFIG.PORT_WSS}\n`);
 
-// ── Graceful shutdown
 async function shutdown() {
   log.info('shutting_down');
   try { await mdns.stop(); } catch {}
