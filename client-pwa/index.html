@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#060a12" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <title>ClipSync</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: -apple-system, ui-sans-serif, system-ui, sans-serif; }
+    .mono { font-family: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; }
+    .pulse-dot { animation: pulse 1.6s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+
+<div id="app" class="max-w-md mx-auto p-4 space-y-5">
+  <header class="flex items-end justify-between border-b border-slate-800 pb-3">
+    <div>
+      <h1 class="mono text-2xl tracking-tight"><span class="text-amber-400">CLIP</span>SYNC</h1>
+      <p id="status" class="mono text-xs text-slate-500 mt-1">starting…</p>
+    </div>
+    <button id="btn-config" class="text-xs text-slate-500 hover:text-amber-400 mono">config</button>
+  </header>
+
+  <!-- Registration -->
+  <section id="register" class="hidden bg-slate-900/50 border border-slate-800 rounded-lg p-4 space-y-3">
+    <h2 class="mono text-sm uppercase tracking-wider text-slate-300">Register this device</h2>
+    <p class="text-sm text-slate-400">
+      Open the hub dashboard, generate a PIN, and enter it here.
+    </p>
+    <input id="hub-url" placeholder="wss://192.168.x.x:5678"
+      class="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 mono text-sm focus:outline-none focus:border-amber-500" />
+    <input id="pin-input" inputmode="numeric" pattern="\d*" maxlength="6" placeholder="6-digit PIN"
+      class="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 mono text-2xl tracking-widest text-center focus:outline-none focus:border-amber-500" />
+    <input id="device-name" placeholder="device name (optional)"
+      class="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm focus:outline-none focus:border-amber-500" />
+    <button id="btn-register" class="w-full py-2 bg-amber-500/20 border border-amber-500/40 text-amber-300 rounded mono">register</button>
+    <p id="register-msg" class="text-xs text-rose-400 mono"></p>
+  </section>
+
+  <!-- Compose -->
+  <section id="compose" class="hidden bg-slate-900/50 border border-slate-800 rounded-lg p-4 space-y-3">
+    <h2 class="mono text-sm uppercase tracking-wider text-slate-300">Send to network</h2>
+    <textarea id="compose-text" rows="3" placeholder="type or paste…"
+      class="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm focus:outline-none focus:border-amber-500"></textarea>
+    <div class="flex gap-2">
+      <button id="btn-send" class="flex-1 py-2 bg-amber-500/20 border border-amber-500/40 text-amber-300 rounded mono">send</button>
+      <button id="btn-paste" class="flex-1 py-2 bg-slate-800 border border-slate-700 text-slate-200 rounded mono">paste from clipboard</button>
+    </div>
+  </section>
+
+  <!-- Latest clip -->
+  <section id="latest" class="hidden bg-slate-900/50 border border-slate-800 rounded-lg p-4 space-y-3">
+    <h2 class="mono text-sm uppercase tracking-wider text-slate-300">Latest from network</h2>
+    <div id="latest-content" class="bg-slate-950 border border-slate-800 rounded p-3 max-h-48 overflow-auto"></div>
+    <button id="btn-copy" class="w-full py-2 bg-slate-800 border border-slate-700 rounded mono text-sm">copy to clipboard</button>
+  </section>
+
+  <!-- History -->
+  <section id="history-sec" class="hidden">
+    <h2 class="mono text-sm uppercase tracking-wider text-slate-400 mb-2">Recent</h2>
+    <ul id="history-list" class="space-y-2"></ul>
+  </section>
+</div>
+
+<script type="module" src="/pwa/app.js"></script>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(()=>{}));
+  }
+</script>
+</body>
+</html>

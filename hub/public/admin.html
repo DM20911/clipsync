@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ClipSync — Hub Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://unpkg.com/alpinejs@3/dist/cdn.min.js"></script>
+  <style>
+    body { font-family: -apple-system, ui-sans-serif, system-ui, sans-serif; }
+    .mono { font-family: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; }
+    .glow { box-shadow: 0 0 0 1px rgba(244,162,45,.3), 0 0 24px rgba(244,162,45,.15); }
+    .pulse-dot { animation: pulse 1.6s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+
+<div x-data="dashboard()" x-init="init()" class="max-w-7xl mx-auto p-6 space-y-6">
+
+  <!-- Header -->
+  <header class="flex items-end justify-between border-b border-slate-800 pb-4">
+    <div>
+      <h1 class="mono text-3xl tracking-tight"><span class="text-amber-400">CLIP</span>SYNC</h1>
+      <p class="text-slate-400 text-sm mt-1">distributed clipboard · local network · end-to-end encrypted</p>
+    </div>
+    <div class="text-right text-sm">
+      <div class="mono text-slate-300" x-text="status.hub || '—'"></div>
+      <div class="mono text-xs text-slate-500">
+        <span class="inline-block w-2 h-2 rounded-full bg-emerald-400 pulse-dot mr-1"></span>
+        <span x-text="connected ? 'live' : 'reconnecting…'"></span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Stats row -->
+  <section class="grid grid-cols-1 md:grid-cols-4 gap-4">
+    <div class="bg-slate-900/60 border border-slate-800 rounded-lg p-4">
+      <div class="text-xs uppercase text-slate-500 tracking-wider">Devices</div>
+      <div class="mono text-2xl mt-1" x-text="devices.length"></div>
+    </div>
+    <div class="bg-slate-900/60 border border-slate-800 rounded-lg p-4">
+      <div class="text-xs uppercase text-slate-500 tracking-wider">History items</div>
+      <div class="mono text-2xl mt-1" x-text="history.length"></div>
+    </div>
+    <div class="bg-slate-900/60 border border-slate-800 rounded-lg p-4">
+      <div class="text-xs uppercase text-slate-500 tracking-wider">Events</div>
+      <div class="mono text-2xl mt-1" x-text="events.length"></div>
+    </div>
+    <div class="bg-slate-900/60 border border-slate-800 rounded-lg p-4">
+      <div class="text-xs uppercase text-slate-500 tracking-wider">Hub</div>
+      <div class="mono text-sm mt-1 truncate" x-text="status.hub || '—'"></div>
+    </div>
+  </section>
+
+  <!-- Two columns -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+    <!-- Devices -->
+    <section class="lg:col-span-2 bg-slate-900/40 border border-slate-800 rounded-lg p-5">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="mono text-sm uppercase tracking-wider text-slate-300">Connected devices</h2>
+        <button @click="refresh()" class="text-xs text-slate-400 hover:text-amber-400">refresh</button>
+      </div>
+      <div class="space-y-2">
+        <template x-for="d in allDevices" :key="d.id">
+          <div class="flex items-center justify-between py-2 px-3 bg-slate-950 border border-slate-800 rounded">
+            <div class="flex items-center gap-3">
+              <span class="inline-block w-2 h-2 rounded-full"
+                    :class="isOnline(d.id) ? 'bg-emerald-400' : 'bg-slate-600'"></span>
+              <div>
+                <div class="font-medium" x-text="d.name || 'unnamed'"></div>
+                <div class="mono text-xs text-slate-500" x-text="(d.os || '—') + ' · ' + d.id.slice(0,8)"></div>
+              </div>
+            </div>
+            <div class="flex items-center gap-3">
+              <span class="mono text-xs text-slate-500"
+                    x-text="d.last_seen ? relTime(d.last_seen) : '—'"></span>
+              <button @click="revoke(d.id)"
+                      class="text-xs px-2 py-1 border border-slate-700 rounded hover:border-rose-500 hover:text-rose-400">
+                revoke
+              </button>
+            </div>
+          </div>
+        </template>
+        <div x-show="!allDevices.length" class="text-slate-500 text-sm py-4 text-center">no devices yet</div>
+      </div>
+
+      <!-- Register new device -->
+      <div class="mt-6 pt-5 border-t border-slate-800">
+        <button @click="generateQR()"
+                class="px-4 py-2 bg-amber-500/10 border border-amber-500/40 rounded text-amber-300 hover:bg-amber-500/20 mono text-sm">
+          + register new device
+        </button>
+        <div x-show="qr" class="mt-4 p-4 bg-slate-950 border border-slate-800 rounded flex items-center gap-6">
+          <img :src="qr" class="w-40 h-40 rounded bg-white p-2" alt="QR" />
+          <div>
+            <div class="text-xs uppercase text-slate-500 tracking-wider">PIN</div>
+            <div class="mono text-3xl tracking-widest text-amber-400" x-text="pin"></div>
+            <div class="mono text-xs text-slate-500 mt-2">expires in <span x-text="pinCountdown"></span>s</div>
+            <div class="mono text-xs text-slate-500 mt-2 break-all" x-text="qrPayload"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- History + Events -->
+    <div class="space-y-6">
+
+      <section class="bg-slate-900/40 border border-slate-800 rounded-lg p-5">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="mono text-sm uppercase tracking-wider text-slate-300">Recent history</h2>
+          <button @click="clearHistory()" class="text-xs text-slate-400 hover:text-rose-400">clear</button>
+        </div>
+        <div class="space-y-2 max-h-80 overflow-y-auto">
+          <template x-for="item in history" :key="item.id">
+            <div class="py-2 px-3 bg-slate-950 border border-slate-800 rounded">
+              <div class="flex items-center justify-between text-xs">
+                <span class="mono uppercase text-amber-400" x-text="item.type"></span>
+                <span class="mono text-slate-500" x-text="relTime(item.timestamp)"></span>
+              </div>
+              <div class="mono text-xs text-slate-400 mt-1 truncate"
+                   x-text="(item.mime || '—') + ' · ' + fmtSize(item.size)"></div>
+            </div>
+          </template>
+          <div x-show="!history.length" class="text-slate-500 text-sm py-3 text-center">no items</div>
+        </div>
+      </section>
+
+      <section class="bg-slate-900/40 border border-slate-800 rounded-lg p-5">
+        <h2 class="mono text-sm uppercase tracking-wider text-slate-300 mb-3">Live events</h2>
+        <div class="space-y-1 max-h-72 overflow-y-auto mono text-xs">
+          <template x-for="e in events.slice().reverse()" :key="e._t + e.kind + (e.id || '')">
+            <div class="flex gap-2">
+              <span class="text-slate-600" x-text="new Date(e._t).toLocaleTimeString()"></span>
+              <span class="text-amber-400" x-text="e.kind"></span>
+              <span class="text-slate-400 truncate" x-text="evDetail(e)"></span>
+            </div>
+          </template>
+          <div x-show="!events.length" class="text-slate-500 py-2 text-center">waiting…</div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<script>
+function dashboard() {
+  return {
+    status: {},
+    devices: [],            // currently connected
+    allDevices: [],         // registered (online + offline)
+    history: [],
+    events: [],
+    qr: null, pin: null, qrPayload: null, pinExp: 0, pinCountdown: 0,
+    connected: false,
+    timer: null,
+
+    async init() {
+      await this.refresh();
+      this.connectSse();
+      setInterval(() => this.tickPin(), 1000);
+      setInterval(() => this.refresh(), 15000);
+    },
+
+    async refresh() {
+      try {
+        const [s, d, h] = await Promise.all([
+          fetch('/api/status').then(r=>r.json()),
+          fetch('/api/devices').then(r=>r.json()),
+          fetch('/api/history?limit=30').then(r=>r.json()),
+        ]);
+        this.status = s;
+        this.devices = s.devices || [];
+        this.allDevices = (d.devices || []).filter(x => !x.revoked);
+        this.history = h.items || [];
+      } catch (e) { console.error(e); }
+    },
+
+    connectSse() {
+      const es = new EventSource('/api/events');
+      es.onopen  = () => this.connected = true;
+      es.onerror = () => this.connected = false;
+      es.onmessage = (m) => {
+        const ev = JSON.parse(m.data);
+        ev._t = Date.now();
+        this.events.push(ev);
+        if (this.events.length > 200) this.events.splice(0, this.events.length - 200);
+        if (['device_connected','device_disconnected','device_registered','device_revoked','clip','history_cleared'].includes(ev.kind)) {
+          this.refresh();
+        }
+      };
+    },
+
+    isOnline(id) { return this.devices.some(d => d.id === id); },
+
+    async generateQR() {
+      const r = await fetch('/api/qr').then(r=>r.json());
+      this.qr = r.qr; this.pin = r.pin; this.qrPayload = r.payload;
+      this.pinExp = r.expiresAt;
+    },
+
+    tickPin() {
+      if (!this.pinExp) return;
+      const left = Math.max(0, Math.floor((this.pinExp - Date.now())/1000));
+      this.pinCountdown = left;
+      if (left === 0) { this.qr = null; this.pin = null; this.pinExp = 0; }
+    },
+
+    async revoke(id) {
+      if (!confirm('Revoke this device?')) return;
+      await fetch('/api/devices/' + id, { method: 'DELETE' });
+      this.refresh();
+    },
+
+    async clearHistory() {
+      if (!confirm('Clear all history?')) return;
+      await fetch('/api/history', { method: 'DELETE' });
+      this.refresh();
+    },
+
+    evDetail(e) {
+      if (e.kind === 'clip') return `${e.type} · ${this.fmtSize(e.size)} from ${(e.from||'').slice(0,8)}`;
+      if (e.id) return e.id.slice(0, 8);
+      return '';
+    },
+
+    relTime(ts) {
+      if (!ts) return '—';
+      const s = Math.floor((Date.now() - ts)/1000);
+      if (s < 60) return s + 's';
+      if (s < 3600) return Math.floor(s/60) + 'm';
+      if (s < 86400) return Math.floor(s/3600) + 'h';
+      return Math.floor(s/86400) + 'd';
+    },
+
+    fmtSize(b) {
+      if (!b) return '0 B';
+      const u = ['B','KB','MB','GB']; let i = 0; let n = b;
+      while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+      return n.toFixed(n < 10 ? 1 : 0) + ' ' + u[i];
+    },
+  };
+}
+</script>
+
+</body>
+</html>
