@@ -10,66 +10,79 @@ function tmpDb() {
   const p = path.join(os.tmpdir(), `clipsync-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
   return { db: new DB(p), path: p };
 }
-
-test('issuePin returns valid 6-digit pin and stores it', () => {
+function freshAuth() {
   const { db, path: p } = tmpDb();
-  const auth = new Auth(db);
+  return { db, auth: new Auth(db), cleanup: () => { db.close(); fs.unlinkSync(p); } };
+}
+
+test('issuePin returns valid 6-digit pin', () => {
+  const { auth, cleanup } = freshAuth();
   const { pin, expiresAt } = auth.issuePin();
   assert.match(pin, /^\d{6}$/);
   assert.ok(expiresAt > Date.now());
-  db.close(); fs.unlinkSync(p);
+  cleanup();
 });
 
 test('consumePin succeeds once, then fails', () => {
-  const { db, path: p } = tmpDb();
-  const auth = new Auth(db);
+  const { auth, cleanup } = freshAuth();
   const { pin } = auth.issuePin();
   assert.ok(auth.consumePin(pin));
   assert.ok(!auth.consumePin(pin));
-  db.close(); fs.unlinkSync(p);
+  cleanup();
+});
+
+test('PIN invalidated after 5 failures', () => {
+  const { auth, cleanup } = freshAuth();
+  const { pin } = auth.issuePin();
+  for (let i = 0; i < 5; i++) auth.consumePin('000000');
+  assert.equal(auth.consumePin(pin), false);
+  cleanup();
+});
+
+test('registerDevice rejects oversize name', () => {
+  const { auth, cleanup } = freshAuth();
+  assert.throws(
+    () => auth.registerDevice({ name: 'x'.repeat(100), os: 'l', publicKey: Buffer.from('pk') }),
+    /invalid_name/
+  );
+  cleanup();
+});
+
+test('registerDevice rejects missing public key', () => {
+  const { auth, cleanup } = freshAuth();
+  assert.throws(
+    () => auth.registerDevice({ name: 'A', os: 'l', publicKey: null }),
+    /invalid_public_key/
+  );
+  cleanup();
 });
 
 test('register → verifyToken roundtrip', () => {
-  const { db, path: p } = tmpDb();
-  const auth = new Auth(db);
-  const reg = auth.registerDevice({ name: 'TestBox', os: 'darwin' });
+  const { auth, cleanup } = freshAuth();
+  const reg = auth.registerDevice({ name: 'TestBox', os: 'darwin', publicKey: Buffer.from('pk') });
   assert.ok(reg.id);
   assert.ok(reg.jwt);
-  // token returned is the network key (shared); verify it matches Auth.networkKey
-  assert.equal(reg.token, auth.getNetworkKey());
-
   const v = auth.verifyToken(reg.jwt);
   assert.ok(v.ok);
   assert.equal(v.device.id, reg.id);
-  db.close(); fs.unlinkSync(p);
+  cleanup();
 });
 
-test('revoked device fails verifyToken', () => {
-  const { db, path: p } = tmpDb();
-  const auth = new Auth(db);
-  const reg = auth.registerDevice({ name: 'X' });
+test('JTI revocation cascade closes JWTs', () => {
+  const { auth, cleanup } = freshAuth();
+  const reg = auth.registerDevice({ name: 'a', os: 'l', publicKey: Buffer.from('pk') });
+  assert.equal(auth.verifyToken(reg.jwt).ok, true);
   auth.revokeDevice(reg.id);
   const v = auth.verifyToken(reg.jwt);
   assert.equal(v.ok, false);
-  assert.equal(v.reason, 'device_revoked');
-  db.close(); fs.unlinkSync(p);
+  cleanup();
 });
 
 test('rotateSecret invalidates old tokens', () => {
-  const { db, path: p } = tmpDb();
-  const auth = new Auth(db);
-  const reg = auth.registerDevice({ name: 'X' });
+  const { auth, cleanup } = freshAuth();
+  const reg = auth.registerDevice({ name: 'X', os: 'l', publicKey: Buffer.from('pk') });
   auth.rotateSecret();
   const v = auth.verifyToken(reg.jwt);
   assert.equal(v.ok, false);
-  db.close(); fs.unlinkSync(p);
-});
-
-test('all devices share the same network key', () => {
-  const { db, path: p } = tmpDb();
-  const auth = new Auth(db);
-  const a = auth.registerDevice({ name: 'A' });
-  const b = auth.registerDevice({ name: 'B' });
-  assert.equal(a.token, b.token);
-  db.close(); fs.unlinkSync(p);
+  cleanup();
 });
