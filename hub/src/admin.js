@@ -1,5 +1,5 @@
 // Admin authentication: token / password / first-device modes + session cookies.
-import { randomToken, timingSafeEqualBuf } from '../../shared/crypto-node.js';
+import { randomToken, timingSafeEqualBuf, sha256Hex } from '../../shared/crypto-node.js';
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 
@@ -14,15 +14,16 @@ export class Admin {
 
   bootstrap() {
     if (this.mode === 'token') {
-      let tok = this.db.getMeta('admin_token');
-      let printed = false;
-      if (!tok) {
-        tok = randomToken(32);
-        this.db.setMeta('admin_token', tok);
-        printed = true;
+      let hash = this.db.getMeta('admin_token_hash');
+      if (!hash) {
+        const tok = randomToken(32);
+        hash = sha256Hex(tok);
+        this.db.setMeta('admin_token_hash', hash);
+        this.adminTokenHash = hash;
+        return tok; // displayed once at creation
       }
-      this.adminToken = tok;
-      return printed ? tok : null;
+      this.adminTokenHash = hash;
+      return null;
     }
     if (this.mode === 'password') {
       if (!this.password) throw new Error('CLIPSYNC_ADMIN_PASSWORD required in password mode');
@@ -32,15 +33,15 @@ export class Admin {
 
   verifyCredential(input) {
     if (this.mode === 'token') {
-      if (!this.adminToken || !input) return false;
-      const a = Buffer.from(this.adminToken);
-      const b = Buffer.from(String(input));
+      if (!this.adminTokenHash || !input) return false;
+      const a = Buffer.from(this.adminTokenHash, 'hex');
+      const b = Buffer.from(sha256Hex(String(input)), 'hex');
       return timingSafeEqualBuf(a, b);
     }
     if (this.mode === 'password') {
       if (!this.password || !input) return false;
-      const a = Buffer.from(this.password);
-      const b = Buffer.from(String(input));
+      const a = Buffer.from(sha256Hex(this.password), 'hex');
+      const b = Buffer.from(sha256Hex(String(input)), 'hex');
       return timingSafeEqualBuf(a, b);
     }
     return false;
@@ -71,6 +72,7 @@ export class Admin {
 
 export function parseCookie(header, name) {
   if (!header) return null;
-  const m = header.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]+)'));
+  const escaped = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = header.match(new RegExp('(?:^|;\\s*)' + escaped + '=([^;]+)'));
   return m ? decodeURIComponent(m[1]) : null;
 }

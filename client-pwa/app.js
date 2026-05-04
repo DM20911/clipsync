@@ -270,15 +270,21 @@ function renderHistory() {
   for (const it of history.slice(0, 20)) {
     const li = document.createElement('li');
     li.className = 'bg-slate-900/50 border border-slate-800 rounded p-2 cursor-pointer hover:border-amber-500/40';
-    li.innerHTML = `
-      <div class="flex justify-between items-center">
-        <span class="mono text-xs uppercase text-amber-400">${it.type}</span>
-        <span class="mono text-xs text-slate-500">${new Date(it.timestamp).toLocaleTimeString()}</span>
-      </div>
-      <div class="mt-1 text-sm truncate text-slate-300">${
-        it.type === 'image' ? `image · ${fmtSize(it.size)}`
-                            : (it.text || '').slice(0, 80).replace(/</g, '&lt;')
-      }</div>`;
+    const head = document.createElement('div');
+    head.className = 'flex justify-between items-center';
+    const typeSpan = document.createElement('span');
+    typeSpan.className = 'mono text-xs uppercase text-amber-400';
+    typeSpan.textContent = it.type;
+    const tsSpan = document.createElement('span');
+    tsSpan.className = 'mono text-xs text-slate-500';
+    tsSpan.textContent = new Date(it.timestamp).toLocaleTimeString();
+    head.appendChild(typeSpan); head.appendChild(tsSpan);
+    const body = document.createElement('div');
+    body.className = 'mt-1 text-sm truncate text-slate-300';
+    body.textContent = it.type === 'image'
+      ? `image · ${fmtSize(it.size)}`
+      : (it.text || '').slice(0, 80);
+    li.appendChild(head); li.appendChild(body);
     li.onclick = async () => { await copyItem(it); flash(); };
     ul.appendChild(li);
   }

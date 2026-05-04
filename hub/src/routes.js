@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { isPrivateIp } from '../../shared/protocol.js';
 import { CONFIG } from './config.js';
 import { parseCookie } from './admin.js';
+import { AttemptCounter } from './rate-limit.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, '..', 'public');
@@ -58,6 +59,7 @@ export class Routes {
     eventBus.on('event', (ev) => this.#sseBroadcast(ev));
     this.allowedOrigin = `https://${primaryLanIp()}:${CONFIG.PORT_HTTP}`;
     this.allowedOriginLocal = `https://localhost:${CONFIG.PORT_HTTP}`;
+    this.adminLoginCounter = new AttemptCounter({ maxAttempts: 5, windowMs: 15 * 60_000 });
   }
 
   #sseBroadcast(ev) {
@@ -135,11 +137,18 @@ export class Routes {
 
     // Admin auth (open)
     if (pathname === '/api/admin/login' && req.method === 'POST') {
+      const ip = req.socket.remoteAddress || '';
+      const hit = this.adminLoginCounter.hit(ip);
+      if (!hit.allowed) {
+        return this.#json(res, 429, { error: 'rate_limited', reset_at: hit.resetAt });
+      }
       const body = await readJson(req).catch(() => null);
       if (!body) return this.#json(res, 400, { error: 'invalid_json' });
       if (!this.admin.verifyCredential(body.credential)) {
+        this.events.emit('event', { kind: 'admin_login_fail', ip });
         return this.#json(res, 401, { error: 'invalid_credential' });
       }
+      this.adminLoginCounter.reset(ip);
       const sid = this.admin.issueSession();
       res.setHeader('set-cookie', `admin_session=${sid}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${8*60*60}`);
       return this.#json(res, 200, { ok: true });
@@ -266,7 +275,21 @@ export class Routes {
       } else res.destroy();
     });
     stream.on('open', () => {
-      res.writeHead(200, { 'content-type': MIME[ext] || 'application/octet-stream' });
+      const headers = { 'content-type': MIME[ext] || 'application/octet-stream' };
+      if (ext === '.html') {
+        // CSP: own origin + WSS; allow inline styles for current admin UI; allow CDN scripts (tailwind/alpine)
+        headers['content-security-policy'] =
+          "default-src 'self'; " +
+          "script-src 'self' https://cdn.tailwindcss.com https://unpkg.com 'unsafe-inline'; " +
+          "style-src 'self' 'unsafe-inline'; " +
+          "img-src 'self' data: blob:; " +
+          "connect-src 'self' wss: https:; " +
+          "frame-ancestors 'none'; base-uri 'self';";
+        headers['x-content-type-options'] = 'nosniff';
+        headers['x-frame-options'] = 'DENY';
+        headers['referrer-policy'] = 'no-referrer';
+      }
+      res.writeHead(200, headers);
       stream.pipe(res);
     });
   }
