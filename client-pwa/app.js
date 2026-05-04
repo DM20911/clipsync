@@ -1,44 +1,74 @@
-// ClipSync PWA — connects to hub via WSS, encrypts/decrypts via Web Crypto.
+// ClipSync PWA — envelope encryption (X25519 + HKDF + AES-GCM) with non-extractable keys.
 
-const STATE_KEY = 'clipsync_state_v1';
-
+const STATE_KEY = 'clipsync_state_v2';
+const DB_NAME = 'clipsync';
+const DB_STORE = 'keys';
 const $ = (id) => document.getElementById(id);
 
-// ─── State ───────────────────────────────────────────
-function loadState() {
-  try { return JSON.parse(localStorage.getItem(STATE_KEY) || '{}'); }
-  catch { return {}; }
-}
-function saveState(s) { localStorage.setItem(STATE_KEY, JSON.stringify(s)); }
-function clearState() { localStorage.removeItem(STATE_KEY); }
-
-let state = loadState();
+let state = {};
 let ws = null;
 let connected = false;
 let latest = null;
 let history = [];
 let reconnectMs = 1000;
+let myKeyPair = null;     // { privateKey: CryptoKey, publicKeyB64 }
+let peers = new Map();    // deviceId -> CryptoKey (x25519 public)
 
-// ─── UI helpers ──────────────────────────────────────
-function setStatus(text, ok = true) {
-  const dotColor = ok ? 'text-emerald-400' : 'text-rose-400';
-  $('status').innerHTML =
-    `<span class="${dotColor} pulse-dot inline-block">●</span> ${text}`;
+function loadState() { try { return JSON.parse(localStorage.getItem(STATE_KEY) || '{}'); } catch { return {}; } }
+function saveState(s) { localStorage.setItem(STATE_KEY, JSON.stringify(s)); }
+function clearState() { localStorage.removeItem(STATE_KEY); }
+
+// ─── IndexedDB for non-extractable keys ───
+function idb() {
+  return new Promise((resolve, reject) => {
+    const r = indexedDB.open(DB_NAME, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore(DB_STORE);
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+}
+async function idbPut(key, val) {
+  const db = await idb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, 'readwrite');
+    tx.objectStore(DB_STORE).put(val, key);
+    tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbGet(key) {
+  const db = await idb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, 'readonly');
+    const r = tx.objectStore(DB_STORE).get(key);
+    r.onsuccess = () => resolve(r.result || null);
+    r.onerror = () => reject(r.error);
+  });
+}
+async function idbClear() {
+  const db = await idb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, 'readwrite');
+    tx.objectStore(DB_STORE).clear();
+    tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+  });
 }
 
+// ─── UI helpers ───
+function setStatus(text, ok = true) {
+  const c = ok ? 'text-emerald-400' : 'text-rose-400';
+  $('status').innerHTML = `<span class="${c} pulse-dot inline-block">●</span> ${text}`;
+}
 function showRegister() {
   $('register').classList.remove('hidden');
   $('compose').classList.add('hidden');
   $('latest').classList.add('hidden');
   $('history-sec').classList.add('hidden');
 }
-
 function showMain() {
   $('register').classList.add('hidden');
   $('compose').classList.remove('hidden');
   $('history-sec').classList.remove('hidden');
 }
-
 function fmtSize(b) {
   if (!b) return '0 B';
   const u = ['B','KB','MB','GB']; let i=0; let n=b;
@@ -46,88 +76,88 @@ function fmtSize(b) {
   return n.toFixed(n < 10 ? 1 : 0) + ' ' + u[i];
 }
 
-// ─── Crypto (matches hub/desktop AES-256-GCM + PBKDF2) ──
-const PBKDF2_ITER = 100_000;
-
-async function deriveKey(token, salt) {
-  const enc = new TextEncoder();
-  const baseKey = await crypto.subtle.importKey(
-    'raw', enc.encode(token), { name: 'PBKDF2' }, false, ['deriveKey']
-  );
-  return crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt, iterations: PBKDF2_ITER, hash: 'SHA-256' },
-    baseKey,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt', 'decrypt']
-  );
-}
-
-async function encryptBuf(buf, token) {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const iv   = crypto.getRandomValues(new Uint8Array(12));
-  const key  = await deriveKey(token, salt);
-  const enc  = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, buf);
-  // enc already includes the 16-byte tag at the end. Layout: salt|iv|ct+tag
-  // To match the Node.js layout (salt|iv|tag|ct), we have to split tag and ct:
-  const encArr = new Uint8Array(enc);
-  const tag = encArr.subarray(encArr.length - 16);
-  const ct  = encArr.subarray(0, encArr.length - 16);
-  const out = new Uint8Array(salt.length + iv.length + tag.length + ct.length);
-  out.set(salt, 0);
-  out.set(iv,   salt.length);
-  out.set(tag,  salt.length + iv.length);
-  out.set(ct,   salt.length + iv.length + tag.length);
-  let binary = '';
-  for (let i = 0; i < out.length; i += 8192) {
-    binary += String.fromCharCode(...out.subarray(i, i + 8192));
+// ─── Crypto ───
+async function ensureKeypair() {
+  let priv = await idbGet('x25519_private');
+  let pubB64 = (await idbGet('x25519_public_b64')) || null;
+  if (!priv) {
+    const kp = await crypto.subtle.generateKey({ name: 'X25519' }, false, ['deriveBits']);
+    priv = kp.privateKey;
+    const pubRaw = await crypto.subtle.exportKey('raw', kp.publicKey);
+    pubB64 = bytesToB64(new Uint8Array(pubRaw));
+    await idbPut('x25519_private', priv);
+    await idbPut('x25519_public_b64', pubB64);
   }
-  return btoa(binary);
+  myKeyPair = { privateKey: priv, publicKeyB64: pubB64 };
 }
 
-async function decryptB64(b64, token) {
-  const raw = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-  const salt = raw.subarray(0, 16);
-  const iv   = raw.subarray(16, 28);
-  const tag  = raw.subarray(28, 44);
-  const ct   = raw.subarray(44);
-  // Web Crypto expects ct+tag concatenated:
+async function importPublicKey(b64) {
+  const raw = b64ToBytes(b64);
+  return crypto.subtle.importKey('raw', raw, { name: 'X25519' }, false, []);
+}
+
+async function deriveAesKey(myPriv, peerPub, salt, info) {
+  const shared = await crypto.subtle.deriveBits(
+    { name: 'X25519', public: peerPub }, myPriv, 256
+  );
+  const hkdfKey = await crypto.subtle.importKey('raw', shared, 'HKDF', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt, info: new TextEncoder().encode(info) },
+    hkdfKey,
+    { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
+  );
+}
+
+// Layout: [iv:12][tag:16][ct]
+async function aesGcmEncrypt(key, payload) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ctTag = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, payload));
+  const tag = ctTag.subarray(ctTag.length - 16);
+  const ct  = ctTag.subarray(0, ctTag.length - 16);
+  const out = new Uint8Array(iv.length + tag.length + ct.length);
+  out.set(iv, 0); out.set(tag, iv.length); out.set(ct, iv.length + tag.length);
+  return out;
+}
+async function aesGcmDecrypt(key, buf) {
+  const iv  = buf.subarray(0, 12);
+  const tag = buf.subarray(12, 28);
+  const ct  = buf.subarray(28);
   const ctTag = new Uint8Array(ct.length + tag.length);
   ctTag.set(ct, 0); ctTag.set(tag, ct.length);
-  const key = await deriveKey(token, salt);
-  return new Uint8Array(
-    await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ctTag)
-  );
+  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ctTag));
 }
+
+function bytesToB64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 8192) {
+    s += String.fromCharCode(...bytes.subarray(i, Math.min(i + 8192, bytes.length)));
+  }
+  return btoa(s);
+}
+function b64ToBytes(b64) { return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)); }
 
 async function sha256Hex(buf) {
   const h = await crypto.subtle.digest('SHA-256', buf);
   return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2,'0')).join('');
 }
 
-// ─── Registration ────────────────────────────────────
+// ─── Registration ───
 async function registerDevice() {
+  await ensureKeypair();
   const url  = $('hub-url').value.trim();
   const pin  = $('pin-input').value.trim();
-  const name = $('device-name').value.trim() || (navigator.userAgent.includes('iPhone') ? 'iPhone' :
-                navigator.userAgent.includes('Android') ? 'Android' : 'Browser');
+  const name = $('device-name').value.trim() || 'Browser';
+  if (!url || !pin) { $('register-msg').textContent = 'hub URL and PIN required'; return; }
 
-  if (!url || !pin) {
-    $('register-msg').textContent = 'hub URL and PIN are required';
-    return;
-  }
-  // Convert wss:// to https:// for HTTP register endpoint
-  const httpsBase = url.replace(/^wss:/, 'https:').replace(/:\d+$/, ':' + (state.http_port || 5679));
+  const httpsBase = url.replace(/^wss:/, 'https:').replace(/:(\d+)$/, ':5679');
 
   try {
     const r = await fetch(httpsBase + '/api/register', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        pin,
-        name,
-        os: navigator.platform || 'browser',
-        fingerprint: null,
+        pin, name, os: navigator.platform || 'browser', fingerprint: null,
+        public_key: myKeyPair.publicKeyB64,
       }),
     });
     if (!r.ok) {
@@ -136,42 +166,35 @@ async function registerDevice() {
       return;
     }
     const reg = await r.json();
-    state = {
-      hub_url: url,
-      http_base: httpsBase,
-      device_id: reg.id,
-      token: reg.token,
-      jwt: reg.jwt,
-    };
+    state = { hub_url: url, http_base: httpsBase, device_id: reg.id, jwt: reg.jwt };
     saveState(state);
-    showMain();
-    connect();
-  } catch (e) {
-    $('register-msg').textContent = 'error: ' + e.message;
-  }
+    showMain(); connect();
+  } catch (e) { $('register-msg').textContent = 'error: ' + e.message; }
 }
 
-// ─── WebSocket connection ────────────────────────────
+// ─── WS ───
 function connect() {
   if (!state.jwt) return showRegister();
   setStatus('connecting…');
-
   ws = new WebSocket(state.hub_url);
   ws.binaryType = 'arraybuffer';
 
-  ws.onopen = () => {
-    ws.send(JSON.stringify({ op: 'auth', token: state.jwt }));
-  };
-
+  ws.onopen = () => ws.send(JSON.stringify({ op: 'auth', token: state.jwt }));
   ws.onmessage = async (ev) => {
-    let m;
-    try { m = JSON.parse(ev.data); } catch { return; }
-
+    let m; try { m = JSON.parse(ev.data); } catch { return; }
     if (m.op === 'auth_ok') {
-      connected = true;
-      reconnectMs = 1000;
-      setStatus(`connected · ${(m.devices || []).length} peer${(m.devices||[]).length === 1 ? '' : 's'}`);
+      connected = true; reconnectMs = 1000;
+      setStatus(`connected · ${(m.peers || []).length} peer(s)`);
+      peers.clear();
+      for (const p of (m.peers || [])) peers.set(p.id, await importPublicKey(p.public_key));
       ws.send(JSON.stringify({ op: 'history_request', limit: 20 }));
+      return;
+    }
+    if (m.op === 'peers') {
+      peers.clear();
+      for (const p of (m.peers || [])) {
+        if (p.id !== state.device_id) peers.set(p.id, await importPublicKey(p.public_key));
+      }
       return;
     }
     if (m.op === 'auth_fail') {
@@ -185,52 +208,45 @@ function connect() {
       if (m.clip.source_device === state.device_id) return;
       await ingestClip(m.clip);
     }
-    if (m.op === 'history' && m.items) {
-      for (const c of m.items.reverse()) await ingestClip(c, /*silent=*/true);
-    }
-    if (m.op === 'device_joined' || m.op === 'device_left') {
-      // Could refresh peer count here.
-    }
+    if (m.op === 'history' && m.items) for (const c of m.items.reverse()) await ingestClip(c, true);
   };
-
   ws.onclose = () => {
     connected = false;
     setStatus('disconnected — reconnecting…', false);
-    setTimeout(() => { reconnectMs = Math.min(reconnectMs*2, 30000); connect(); }, reconnectMs);
+    setTimeout(() => { reconnectMs = Math.min(reconnectMs * 2, 30000); connect(); }, reconnectMs);
   };
-  ws.onerror = () => { /* close handler reconnects */ };
+  ws.onerror = () => {};
 }
 
 async function ingestClip(c, silent = false) {
   try {
-    const buf = await decryptB64(c.payload_b64, state.token);
+    const senderPub = await importPublicKey(c.sender_ephemeral_public);
+    const wrapSalt  = b64ToBytes(c.wrap_salt);
+    const wrapKey   = await deriveAesKey(myKeyPair.privateKey, senderPub, wrapSalt, 'clipsync-v1');
+    const contentKeyBytes = await aesGcmDecrypt(wrapKey, b64ToBytes(c.wrapped_key));
+    const contentKey = await crypto.subtle.importKey('raw', contentKeyBytes, { name: 'AES-GCM' }, false, ['decrypt']);
+    const buf = await aesGcmDecrypt(contentKey, b64ToBytes(c.encrypted_payload));
     const item = {
       id: c.id, type: c.type, mime: c.mime, size: c.size,
-      timestamp: c.timestamp, source: c.source_device,
-      buf,
+      timestamp: c.timestamp, source: c.source_device, buf,
       text: (c.type === 'text' || c.type === 'url') ? new TextDecoder().decode(buf) : null,
     };
     history.unshift(item);
     if (history.length > 30) history.pop();
     latest = item;
-    renderLatest();
-    renderHistory();
+    renderLatest(); renderHistory();
     if (!silent) flash();
-  } catch (e) {
-    console.warn('ingest failed:', e.message);
-  }
+  } catch (e) { console.warn('ingest failed:', e.message); }
 }
 
 function flash() {
   document.body.style.boxShadow = 'inset 0 0 0 2px rgba(244,162,45,.55)';
   setTimeout(() => document.body.style.boxShadow = '', 350);
 }
-
 function renderLatest() {
   if (!latest) return;
   $('latest').classList.remove('hidden');
-  const c = $('latest-content');
-  c.innerHTML = '';
+  const c = $('latest-content'); c.innerHTML = '';
   if (latest.type === 'image') {
     const blob = new Blob([latest.buf], { type: latest.mime || 'image/png' });
     const img = document.createElement('img');
@@ -248,11 +264,9 @@ function renderLatest() {
   meta.textContent = `${latest.type} · ${fmtSize(latest.size)} · ${new Date(latest.timestamp).toLocaleTimeString()}`;
   c.appendChild(meta);
 }
-
 function renderHistory() {
   $('history-sec').classList.remove('hidden');
-  const ul = $('history-list');
-  ul.innerHTML = '';
+  const ul = $('history-list'); ul.innerHTML = '';
   for (const it of history.slice(0, 20)) {
     const li = document.createElement('li');
     li.className = 'bg-slate-900/50 border border-slate-800 rounded p-2 cursor-pointer hover:border-amber-500/40';
@@ -264,13 +278,11 @@ function renderHistory() {
       <div class="mt-1 text-sm truncate text-slate-300">${
         it.type === 'image' ? `image · ${fmtSize(it.size)}`
                             : (it.text || '').slice(0, 80).replace(/</g, '&lt;')
-      }</div>
-    `;
+      }</div>`;
     li.onclick = async () => { await copyItem(it); flash(); };
     ul.appendChild(li);
   }
 }
-
 async function copyItem(item) {
   try {
     if (item.type === 'image' && navigator.clipboard?.write) {
@@ -279,18 +291,30 @@ async function copyItem(item) {
     } else {
       await navigator.clipboard.writeText(item.text || '');
     }
-  } catch (e) {
-    alert('clipboard write failed: ' + e.message + '\n(iOS may require manual copy)');
-  }
+  } catch (e) { alert('clipboard write failed: ' + e.message + '\n(iOS may require manual copy)'); }
 }
 
-// ─── Compose / send ──────────────────────────────────
 async function sendText() {
   const txt = $('compose-text').value;
   if (!txt) return;
+  if (peers.size === 0) { alert('no peers connected'); return; }
   const buf = new TextEncoder().encode(txt);
   const checksum = await sha256Hex(buf);
-  const payload_b64 = await encryptBuf(buf, state.token);
+
+  const contentKeyRaw = crypto.getRandomValues(new Uint8Array(32));
+  const contentKey = await crypto.subtle.importKey('raw', contentKeyRaw, { name: 'AES-GCM' }, false, ['encrypt']);
+  const encryptedPayload = await aesGcmEncrypt(contentKey, buf);
+
+  const eph = await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits']);
+  const ephPubRaw = new Uint8Array(await crypto.subtle.exportKey('raw', eph.publicKey));
+  const wrapSalt = crypto.getRandomValues(new Uint8Array(16));
+  const wrappedKeys = {};
+  for (const [pid, pub] of peers) {
+    const wk = await deriveAesKey(eph.privateKey, pub, wrapSalt, 'clipsync-v1');
+    const wrapped = await aesGcmEncrypt(wk, contentKeyRaw);
+    wrappedKeys[pid] = bytesToB64(wrapped);
+  }
+
   const isUrl = /^https?:\/\//.test(txt.trim()) && txt.trim().length < 2048;
   ws.send(JSON.stringify({
     op: 'push',
@@ -301,7 +325,10 @@ async function sendText() {
       size: buf.byteLength,
       timestamp: Date.now(),
       checksum,
-      payload_b64,
+      encrypted_payload: bytesToB64(encryptedPayload),
+      sender_ephemeral_public: bytesToB64(ephPubRaw),
+      wrap_salt: bytesToB64(wrapSalt),
+      wrapped_keys: wrappedKeys,
     },
   }));
   $('compose-text').value = '';
@@ -309,45 +336,34 @@ async function sendText() {
 }
 
 async function pasteFromClipboard() {
-  try {
-    const txt = await navigator.clipboard.readText();
-    if (txt) $('compose-text').value = txt;
-  } catch (e) {
-    alert('clipboard read failed: ' + e.message);
-  }
+  try { const txt = await navigator.clipboard.readText(); if (txt) $('compose-text').value = txt; }
+  catch (e) { alert('clipboard read failed: ' + e.message); }
 }
+async function copyLatest() { if (!latest) return; await copyItem(latest); flash(); }
 
-async function copyLatest() {
-  if (!latest) return;
-  await copyItem(latest);
-  flash();
-}
-
-// ─── Wire up ─────────────────────────────────────────
+// ─── Wire up ───
 $('btn-register').addEventListener('click', registerDevice);
 $('btn-send').addEventListener('click', sendText);
 $('btn-paste').addEventListener('click', pasteFromClipboard);
 $('btn-copy').addEventListener('click', copyLatest);
-$('btn-config').addEventListener('click', () => {
-  if (confirm('Forget this device and re-register?')) { clearState(); location.reload(); }
+$('btn-config').addEventListener('click', async () => {
+  if (confirm('Forget this device and re-register?')) {
+    clearState(); await idbClear(); location.reload();
+  }
 });
 
-// ─── Share-target intake ─────────────────────────────
 const params = new URLSearchParams(location.search);
 if (params.has('share')) {
   const t = params.get('text') || params.get('url') || params.get('title') || '';
   if (t) $('compose-text').value = t;
 }
 
-// ─── Auto-fill hub URL based on current host ────────
+state = loadState();
 const guessedUrl = `wss://${location.hostname}:5678`;
 if (!state.jwt) $('hub-url').value = guessedUrl;
 
-// ─── Boot ────────────────────────────────────────────
-if (state.jwt) {
-  showMain();
-  connect();
-} else {
-  showRegister();
-  setStatus('not registered', false);
-}
+(async () => {
+  await ensureKeypair();
+  if (state.jwt) { showMain(); connect(); }
+  else { showRegister(); setStatus('not registered', false); }
+})();
