@@ -1,76 +1,75 @@
 #!/usr/bin/env node
-// CLI registration: prompts for PIN, connects to hub, persists JWT + token.
+// Interactive PIN-based registration. Generates X25519 keypair on first run.
 import readline from 'node:readline/promises';
+import https from 'node:https';
 import os from 'node:os';
-import WebSocket from 'ws';
-import { findHub } from './discovery.js';
 import { load, save } from './store.js';
-import { OP } from '../../shared/protocol.js';
+import { findHub } from './discovery.js';
+import { generateX25519 } from '../../shared/crypto-node.js';
 
-async function prompt(q) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const a = await rl.question(q);
-  rl.close();
-  return a.trim();
+async function postJson(url, body) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const data = JSON.stringify(body);
+    const req = https.request({
+      method: 'POST',
+      host: u.hostname,
+      port: u.port,
+      path: u.pathname,
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) },
+      rejectUnauthorized: false,
+    }, (res) => {
+      let buf = '';
+      res.on('data', (c) => buf += c);
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, body: JSON.parse(buf) }); }
+        catch { resolve({ status: res.statusCode, body: {} }); }
+      });
+    });
+    req.on('error', reject);
+    req.write(data); req.end();
+  });
 }
 
 async function main() {
-  console.log('ClipSync — device registration');
-  console.log('  Searching the LAN for a hub via mDNS …');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  console.log('ClipSync registration\n');
 
-  let hub = await findHub({ timeoutMs: 6000 });
-  let url;
-  if (hub) {
-    console.log(`  Found hub: ${hub.name} at ${hub.url}`);
-    url = hub.url;
-  } else {
-    const manual = await prompt('  No hub found via mDNS.\n  Enter hub URL (e.g. wss://192.168.1.10:5678): ');
-    if (!manual) process.exit(1);
-    url = manual;
+  let state = load();
+  if (!state.x25519_private_b64) {
+    const kp = generateX25519();
+    state.x25519_private_b64 = kp.privateKey.toString('base64');
+    state.x25519_public_b64  = kp.publicKey.toString('base64');
   }
 
-  const pin = await prompt('  Enter the 6-digit PIN shown on the hub: ');
-  if (!/^\d{6}$/.test(pin)) {
-    console.error('  invalid PIN format');
+  let hubUrl = state.hub_url;
+  if (!hubUrl) {
+    console.log('Searching hub via mDNS (5s)...');
+    const found = await findHub({ timeoutMs: 5000 });
+    if (found) hubUrl = found.url;
+  }
+  if (!hubUrl) hubUrl = await rl.question('Hub WSS URL (e.g. wss://192.168.1.10:5678): ');
+  hubUrl = hubUrl.trim();
+  const httpBase = hubUrl.replace(/^wss:/, 'https:').replace(/:(\d+)$/, ':5679');
+
+  const pin  = (await rl.question('PIN: ')).trim();
+  const name = (await rl.question(`Device name [${os.hostname()}]: `)).trim() || os.hostname();
+
+  const r = await postJson(httpBase + '/api/register', {
+    pin, name, os: process.platform, fingerprint: null,
+    public_key: state.x25519_public_b64,
+  });
+  if (r.status !== 200) {
+    console.error('Registration failed:', r.body);
     process.exit(1);
   }
 
-  const ws = new WebSocket(url, { rejectUnauthorized: false });
-  ws.on('open', () => {
-    ws.send(JSON.stringify({
-      op: OP.REGISTER,
-      pin,
-      name: os.hostname(),
-      os: `${process.platform}-${process.arch}`,
-      fingerprint: null,
-    }));
-  });
-
-  ws.on('message', (raw) => {
-    const m = JSON.parse(raw.toString('utf8'));
-    if (m.op === OP.REGISTER_OK) {
-      save({
-        hub_url: url,
-        device_id: m.device_id,
-        token: m.token,
-        jwt: m.jwt,
-        registered_at: Date.now(),
-      });
-      console.log('\n  ✓ registered. Device id:', m.device_id);
-      console.log('  Run `clipsync` (or `npm start`) to start syncing.');
-      ws.close(1000, 'done');
-      process.exit(0);
-    }
-    if (m.op === OP.AUTH_FAIL) {
-      console.error('  registration failed:', m.reason);
-      process.exit(2);
-    }
-  });
-
-  ws.on('error', (e) => {
-    console.error('  connection error:', e.message);
-    process.exit(3);
-  });
+  state.hub_url = hubUrl;
+  state.device_id = r.body.id;
+  state.jwt = r.body.jwt;
+  save(state);
+  console.log(`\nOK — device ${r.body.id.slice(0,8)} registered.`);
+  console.log('Start the daemon: node client-desktop/src/main.js');
+  rl.close();
 }
-
 main().catch((e) => { console.error(e); process.exit(1); });
