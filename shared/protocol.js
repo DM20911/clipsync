@@ -1,7 +1,7 @@
 // Shared protocol constants and helpers for ClipSync
 // Used by both hub and clients.
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 export const SERVICE_TYPE = '_clipsync._tcp';
 export const DEFAULT_PORT_WSS = 5678;
 export const DEFAULT_PORT_HTTP = 5679;
@@ -41,6 +41,7 @@ export const OP = {
   REVOKED:     'revoked',
   REGISTER:    'register',
   REGISTER_OK: 'register_ok',
+  PEERS:       'peers',
 };
 
 export const CLIP_TYPES = ['text', 'image', 'url', 'file'];
@@ -48,6 +49,15 @@ export const CLIP_TYPES = ['text', 'image', 'url', 'file'];
 export function isUrlClip(text) {
   const t = text.trim();
   return /^https?:\/\//.test(t) && t.length < 2048;
+}
+
+export function isValidEnvelope(clip) {
+  if (!isValidClip(clip)) return false;
+  if (typeof clip.encrypted_payload !== 'string') return false;
+  if (typeof clip.sender_ephemeral_public !== 'string') return false;
+  if (typeof clip.wrap_salt !== 'string') return false;
+  if (!clip.wrapped_keys || typeof clip.wrapped_keys !== 'object') return false;
+  return true;
 }
 
 export function isValidClip(clip) {
