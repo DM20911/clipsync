@@ -16,6 +16,44 @@
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen">
 
+<div id="login-overlay" style="display:none; position:fixed; inset:0; background:#0008; z-index:1000; backdrop-filter:blur(4px);">
+  <div style="background:#1e293b; color:#eee; max-width:420px; margin:80px auto; padding:24px; border-radius:8px; border:1px solid #334155;">
+    <h2 style="margin-top:0; font-family:ui-monospace,monospace;">ADMIN LOGIN</h2>
+    <p id="login-mode" style="opacity:.7; font-size:.9em; margin:8px 0 16px;"></p>
+    <input id="login-cred" type="password" placeholder="Admin token / password"
+           style="width:100%; padding:10px; box-sizing:border-box; background:#0f172a; color:#eee; border:1px solid #334155; border-radius:4px; font-family:ui-monospace,monospace;" />
+    <button id="login-btn" style="margin-top:12px; padding:10px 20px; background:#f59e0b; color:#1e293b; border:0; border-radius:4px; font-weight:600; cursor:pointer;">Sign in</button>
+    <p id="login-err" style="color:#f87171; margin-top:12px; min-height:1.2em; font-size:.9em;"></p>
+  </div>
+</div>
+<script>
+  const _fetch = window.fetch;
+  window.fetch = (u, o = {}) => _fetch(u, { credentials: 'include', ...o });
+  (async () => {
+    try {
+      const r = await fetch('/api/admin/whoami');
+      const w = await r.json();
+      if (!w.authed && w.mode !== 'first-device') {
+        document.getElementById('login-overlay').style.display = 'block';
+        document.getElementById('login-mode').textContent = 'Mode: ' + w.mode;
+        document.getElementById('login-btn').onclick = async () => {
+          const cred = document.getElementById('login-cred').value;
+          const lr = await fetch('/api/admin/login', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ credential: cred }),
+          });
+          if (lr.ok) location.reload();
+          else document.getElementById('login-err').textContent = 'invalid credential';
+        };
+        document.getElementById('login-cred').addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') document.getElementById('login-btn').click();
+        });
+      }
+    } catch {}
+  })();
+</script>
+
 <div x-data="dashboard()" x-init="init()" class="max-w-7xl mx-auto p-6 space-y-6">
 
   <!-- Header -->
