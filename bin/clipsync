@@ -65,16 +65,23 @@ function startTray() {
     const npmCmd = platform === 'win32' ? 'npm.cmd' : 'npm';
     execSync(`${npmCmd} install`, { cwd: trayDir, stdio: 'inherit', shell: true });
   }
-  // Resolve electron binary directly from node_modules (cross-platform safe)
-  const electronBin = path.join(
-    trayDir, 'node_modules', '.bin',
-    platform === 'win32' ? 'electron.cmd' : 'electron'
-  );
-  const child = spawn(electronBin, ['.'], {
+  // Resolve the actual electron binary from node_modules/electron/path.txt
+  // (avoid npx/.cmd shims that pop a console window on Windows)
+  const electronPkg = path.join(trayDir, 'node_modules', 'electron');
+  let electronExe;
+  try {
+    const rel = fs.readFileSync(path.join(electronPkg, 'path.txt'), 'utf8').trim();
+    electronExe = path.join(electronPkg, 'dist', rel);
+    if (!fs.existsSync(electronExe)) throw new Error('not found at ' + electronExe);
+  } catch (e) {
+    console.error('Could not resolve electron binary:', e.message);
+    console.error('Try: cd client-tray && npm rebuild');
+    process.exit(1);
+  }
+  const child = spawn(electronExe, ['.'], {
     cwd: trayDir,
     detached: true,
     stdio: 'ignore',
-    shell: platform === 'win32',  // .cmd needs shell on Windows
     windowsHide: true,
   });
   child.unref();
