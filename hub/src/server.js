@@ -119,14 +119,17 @@ setInterval(() => {
 function send(ws, obj) { try { ws.send(JSON.stringify(obj)); } catch {} }
 
 function broadcastPeers() {
-  const list = [];
-  for (const [id, ws] of sockets) {
-    const dev = db.getDevice(id);
-    if (dev?.public_key) {
-      list.push({ id, name: dev.name, public_key: dev.public_key.toString('base64') });
-    }
-  }
-  for (const ws of sockets.values()) {
+  // Send the full REGISTERED peer list (not just currently connected).
+  // Clients need every recipient's public key to envelope-encrypt clips —
+  // even offline ones, since the hub stores history wrapped per-recipient
+  // for delivery when they reconnect.
+  // Online status is communicated separately via DEVICE_JOINED / DEVICE_LEFT.
+  const all = db.listDevicePublicKeys('').map(p => ({
+    id: p.id,
+    public_key: p.public_key.toString('base64'),
+  }));
+  for (const [recipientId, ws] of sockets) {
+    const list = all.filter(p => p.id !== recipientId);
     send(ws, { op: OP.PEERS, peers: list });
   }
 }
