@@ -12,7 +12,7 @@ import { isUrlClip } from '../../shared/protocol.js';
 const exec = promisify(execFile);
 const platform = process.platform;
 
-const POLL_MS = parseInt(process.env.CLIPSYNC_POLL_MS || '300', 10);
+const POLL_MS = parseInt(process.env.CLIPSYNC_POLL_MS || '150', 10);
 
 export class ClipboardMonitor {
   constructor({ onChange }) {
