@@ -165,15 +165,21 @@ end run`;
   }
 
   if (platform === 'win32') {
+    // System.Windows.Forms.Clipboard.GetImage() handles more formats than
+    // PowerShell's Get-Clipboard -Format Image (which only reads CF_BITMAP).
+    // -STA ensures the clipboard API works (Clipboard requires single-threaded
+    // apartment).
     const ps = `
-$img = Get-Clipboard -Format Image
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$img = [System.Windows.Forms.Clipboard]::GetImage()
 if ($img -eq $null) { exit 1 }
 $ms = New-Object System.IO.MemoryStream
 $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
 [Console]::OpenStandardOutput().Write($ms.ToArray(), 0, $ms.Length)`;
     try {
       const { stdout } = await execBuf('powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-Command', ps]);
+        ['-NoProfile', '-NonInteractive', '-STA', '-Command', ps]);
       return stdout && stdout.length ? stdout : null;
     } catch { return null; }
   }
@@ -216,9 +222,11 @@ async function writeImage(buf) {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $img = [System.Drawing.Image]::FromFile('${tmp.replace(/'/g, "''")}')
-[System.Windows.Forms.Clipboard]::SetImage($img)`;
+[System.Windows.Forms.Clipboard]::SetImage($img)
+$img.Dispose()`;
     try {
-      await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps]);
+      // -STA required for Clipboard API to work
+      await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-Command', ps]);
     } finally { await fs.promises.unlink(tmp).catch(() => {}); }
   }
 }
