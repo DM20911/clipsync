@@ -1,14 +1,28 @@
-# ClipSync — Windows
+# ClipSync en Windows — guía paso a paso
 
-## Requisitos
+> **Antes de empezar:** lee el [README principal](./README.md). Esta guía asume que ya entiendes qué es ClipSync.
 
-- Windows 10 (build 1903+) o Windows 11
-- Node.js 18+ — descarga desde https://nodejs.org
-- PowerShell 5+ (incluido por defecto)
+---
 
-## Instalación
+## ¿Qué vas a lograr?
 
-Abre PowerShell **como Administrador**:
+Que cuando hagas `Ctrl+C` en tu PC, ese contenido aparezca al hacer `Cmd+V` en tu Mac (o `Ctrl+V` en otra PC, "pegar" en tu iPhone). Sin abrir páginas, sin enviar nada manualmente.
+
+---
+
+## Requisitos previos
+
+- [ ] **Windows 10** (build 1903+) o Windows 11
+- [ ] **Node.js 18+** desde https://nodejs.org → "LTS"
+- [ ] **PowerShell 5+** (incluido por defecto)
+- [ ] **El hub corriendo** en alguna máquina de tu red
+- [ ] **Token de admin** + **IP del hub**
+
+---
+
+## Paso 1 — Clonar e instalar
+
+Abre **PowerShell como Administrador** (necesario para crear la tarea programada que arranca al iniciar sesión):
 
 ```powershell
 git clone https://github.com/DM20911/clipsync.git
@@ -25,88 +39,159 @@ Como quieres correr ClipSync?
 Modo [1]:
 ```
 
-- **Tray** instala Electron + auto-launch. Ícono en system tray.
-- **Daemon** crea tarea programada `ClipSync Client` que arranca al iniciar sesión, sin UI.
+→ Aprieta Enter (Tray, recomendado).
 
-> Se necesita Administrador solo para crear la tarea programada (modo daemon). El modo tray no requiere admin.
+Después:
+```
+Registrar dispositivo ahora? [Y/n]
+```
+→ **N** (lo haremos desde el dashboard, más fácil).
 
-### Cambiar de modo después
+> El admin solo se necesita para registrar la tarea programada. ClipSync mismo corre con tu usuario normal, sin privilegios elevados.
+
+---
+
+## Paso 2 — Conseguir un PIN
+
+Abre el browser:
+```
+https://<IP-del-hub>:5679/admin
+```
+
+Acepta el cert. Login con el token. Click **"+ register new device"**.
+
+Copia el comando completo que aparece:
+```bash
+node client-desktop/src/register.js --qr '{"v":2,"hub":"...","pin":"690119","fp":"..."}'
+```
+
+---
+
+## Paso 3 — Registrar este Windows
+
+En PowerShell:
+```powershell
+cd C:\path\to\clipsync
+node client-desktop\src\register.js --qr '<el-comando-completo>'
+```
+
+Sigue las preguntas (Enter para aceptar el nombre por defecto). Verás:
+```
+OK - device XXXXXXXX registered.
+```
+
+✅ **Windows registrado.**
+
+---
+
+## Paso 4 — Arrancar el cliente
 
 ```powershell
 node bin\clipsync switch tray
-node bin\clipsync switch daemon
-node bin\clipsync status
 ```
 
-## Registro inicial
+Aparece un ícono **clipboard** en la **system tray** (esquina inferior derecha de la barra de tareas, junto al reloj).
 
-```powershell
-cd C:\path\to\clipsync\client-desktop
-node src\register.js
-# introduce el PIN
-Start-ScheduledTask -TaskName "ClipSync Client"
+Si no lo ves: Windows oculta íconos de tray. Click la flechita `^` cerca del reloj para ver los hidden icons.
+
+Click derecho en el ícono → menú con estado, peers, recent clips, pause/resume, "Auto-start at login".
+
+---
+
+## Cómo se usa diariamente
+
+```
+Windows:  Ctrl+C  (sobre cualquier cosa)
+            ↓ ~100 ms
+Mac:      Cmd+V   → ahí está
+iPhone:   ↑ → "Pegar"
 ```
 
-## Uso diario
+**Nunca abres el dashboard.** La sincronización es invisible y automática.
 
-Logs:
-
-```powershell
-Get-Content "$env:USERPROFILE\.config\clipsync\client\daemon.log" -Wait
-```
+---
 
 ## Auto-start
 
 **Tray mode**: marca "Auto-start at login" en el menú del tray.
 
-**Daemon mode**: ya configurado por el instalador. Para verificar:
-
+**Daemon mode**: el instalador ya configura Task Scheduler. Verifica:
 ```powershell
 Get-ScheduledTask -TaskName "ClipSync Client"
 ```
 
 Para detener:
-
 ```powershell
-node bin\clipsync stop                     # cualquier modo
+node bin\clipsync stop                      # cualquier modo
 Stop-ScheduledTask -TaskName "ClipSync Client"
-Disable-ScheduledTask -TaskName "ClipSync Client"
 ```
+
+---
 
 ## Solución de problemas
 
 | Síntoma | Causa | Solución |
 |---------|-------|----------|
-| Tarea falla en arranque | Node fuera de PATH | Edita la acción en Task Scheduler con ruta absoluta |
-| No copia imágenes | PowerShell ExecutionPolicy | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
-| `cert_mismatch` | Cert del hub cambió | Borra `hub_cert_fp` de `state.json` |
-| Daemon termina silenciosamente | Falta permisos en directorio de logs | Crea `%USERPROFILE%\.config\clipsync\client\` manualmente |
+| Tarea falla en arranque | `node` fuera de PATH | Edita la acción en Task Scheduler con ruta absoluta a `node.exe` |
+| No copia imágenes | ExecutionPolicy bloquea PowerShell | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
+| `cert_mismatch` | Cert del hub cambió | Edita `%USERPROFILE%\.config\clipsync\client\state.json`, borra `hub_cert_fp`, reinicia |
+| Daemon termina silenciosamente | Falta directorio de logs | Crea `%USERPROFILE%\.config\clipsync\client\` manual |
+| Ícono no aparece | Windows lo escondió | Click flechita `^` en system tray |
+
+### Re-registrar desde cero
+
+```powershell
+node bin\clipsync stop
+Remove-Item -Recurse "$env:USERPROFILE\.config\clipsync\client"
+# Genera nuevo PIN en dashboard, después:
+node client-desktop\src\register.js --qr '<...>'
+node bin\clipsync switch tray
+```
 
 ---
 
-## ──── Notas técnicas ────
-
-### Arquitectura
-
-`clipboard.js` usa PowerShell con `System.Windows.Forms.Clipboard` para imágenes y `clipboardy` para texto. La tarea programada se registra con `RunLevel=Limited` (no `Highest`), corriendo con tus permisos normales.
-
-### Logs
+## Cambiar entre tray y daemon
 
 ```powershell
-Get-Content "$env:USERPROFILE\.config\clipsync\client\daemon.log" -Tail 100
-Get-Content "$env:USERPROFILE\.config\clipsync\client\daemon.err" -Tail 100
+node bin\clipsync switch daemon
+node bin\clipsync switch tray
+node bin\clipsync status
+node bin\clipsync logs            # tail de logs
+```
+
+---
+
+## Desinstalar
+
+```powershell
+node bin\clipsync stop
+Unregister-ScheduledTask -TaskName "ClipSync Client" -Confirm:$false
+Remove-Item -Recurse "$env:USERPROFILE\.config\clipsync"
+Remove-Item -Recurse C:\path\to\clipsync
+```
+
+---
+
+## ──── Referencia técnica ────
+
+### Logs
+```powershell
+Get-Content "$env:USERPROFILE\.config\clipsync\client\daemon.log" -Wait -Tail 50
+Get-Content "$env:USERPROFILE\.config\clipsync\client\daemon.err" -Wait -Tail 50
 ```
 
 ### Estado local
+`%USERPROFILE%\.config\clipsync\client\state.json` — JWT, claves X25519, hub URL, cert FP.
 
-`%USERPROFILE%\.config\clipsync\client\state.json`. Mismo formato que macOS/Linux.
+### Cómo se manejan imágenes en Windows
+`clipboard.js` invoca PowerShell con `System.Windows.Forms.Clipboard` para leer/escribir imágenes. Para texto usa `clipboardy` (npm), nativo y rápido.
 
-### Desinstalar
-
-```powershell
-Unregister-ScheduledTask -TaskName "ClipSync Client" -Confirm:$false
-Remove-Item -Recurse "$env:USERPROFILE\.config\clipsync"
-```
+### Tarea programada
+Se registra como `ClipSync Client` con:
+- Trigger: `AtLogOn` (al iniciar sesión)
+- Principal: tu usuario, RunLevel `Limited` (NO SYSTEM)
+- Settings: reinicio automático en fallo (5 intentos / minuto)
 
 ---
+
 Herramienta desarrollada por [DM20911](https://github.com/DM20911) — [OptimizarIA Consulting SPA](https://optimizaria.com)
