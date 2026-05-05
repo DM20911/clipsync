@@ -28,10 +28,12 @@ export class ClipboardMonitor {
   }
   stop() { if (this.timer) clearInterval(this.timer); }
 
-  // Suppress a hash for 1.5s — used after we WRITE the clipboard so we don't echo back.
+  // Suppress a hash for 5s — used after we WRITE the clipboard so we don't echo back.
+  // Window must be longer than 2× the poll interval AND survive any OS-side
+  // delayed re-encoding of clipboard contents.
   suppress(hash) {
     this.suppressedHashes.add(hash);
-    setTimeout(() => this.suppressedHashes.delete(hash), 1500);
+    setTimeout(() => this.suppressedHashes.delete(hash), 5000);
   }
 
   async tick() {
@@ -63,14 +65,37 @@ export class ClipboardMonitor {
   }
 
   async write({ type, mime, data }) {
-    const hash = sha256(data);
-    this.suppress(hash);
-    this.lastHash = hash;
+    // Suppress the original hash AND the post-write hash. The OS may re-encode
+    // (especially PNG images on Windows), so what we read back can differ from
+    // what we wrote — without this, the loop is: A→B writes, B re-reads with a
+    // different hash, broadcasts back to A, A re-reads with yet another hash, etc.
+    const originalHash = sha256(data);
+    this.suppress(originalHash);
+    this.lastHash = originalHash;
+
     if (type === 'image') {
       await writeImage(data);
     } else {
       await clipboardy.write(data.toString('utf8'));
     }
+
+    // Re-read what the OS actually stored, suppress that too.
+    try {
+      let storedBytes;
+      if (type === 'image') {
+        storedBytes = await readImage();
+      } else {
+        const txt = await clipboardy.read();
+        storedBytes = Buffer.from(txt || '', 'utf8');
+      }
+      if (storedBytes && storedBytes.length) {
+        const storedHash = sha256(storedBytes);
+        if (storedHash !== originalHash) {
+          this.suppress(storedHash);
+          this.lastHash = storedHash;
+        }
+      }
+    } catch { /* re-read failed; suppression by originalHash still applies */ }
   }
 }
 
