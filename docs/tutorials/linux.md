@@ -208,11 +208,12 @@ tail -f ~/.config/clipsync/client/daemon.log
 
 ### Variables
 
-| Variable | Default |
-|----------|---------|
-| `CLIPSYNC_CLIENT_DIR` | `~/.config/clipsync/client` |
-| `DISPLAY` | heredado de la sesión |
-| `WAYLAND_DISPLAY` | heredado |
+| Variable | Default | Función |
+|----------|---------|---------|
+| `CLIPSYNC_CLIENT_DIR` | `~/.config/clipsync/client` | Directorio de estado |
+| `CLIPSYNC_POLL_MS` | `150` | Intervalo de polling del clipboard |
+| `DISPLAY` | heredado | X server display |
+| `WAYLAND_DISPLAY` | heredado | Wayland display |
 
 ### Estado local
 `~/.config/clipsync/client/state.json` con permisos `0o600`. Contiene JWT, claves X25519, hub URL y cert fingerprint pinned.

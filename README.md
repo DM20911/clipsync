@@ -137,7 +137,7 @@ node bin/clipsync status
 - **CSP estricto** en HTML servido por el hub
 - **JTI revocation cascade** al revocar un dispositivo
 
-Ver [docs/superpowers/specs/2026-05-04-security-mitigations-and-tutorials-design.md](docs/superpowers/specs/2026-05-04-security-mitigations-and-tutorials-design.md) para el modelo completo.
+Ver [docs/architecture/security-model.md](docs/architecture/security-model.md) para el modelo criptográfico completo.
 
 ## Requisitos
 

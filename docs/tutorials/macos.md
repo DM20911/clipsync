@@ -322,7 +322,7 @@ ps aux | grep clipsync | grep -v grep
 | Variable | Default | Función |
 |----------|---------|---------|
 | `CLIPSYNC_CLIENT_DIR` | `~/.config/clipsync/client` | Directorio del state.json |
-| `CLIPSYNC_POLL_MS` | `300` | Cada cuántos ms revisa el clipboard |
+| `CLIPSYNC_POLL_MS` | `150` | Intervalo de polling del clipboard (baja a 80 para más responsive) |
 
 ### Arquitectura del cliente
 

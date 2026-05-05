@@ -56,7 +56,7 @@ TU MAC                    HUB                    TU PC WINDOWS
 - Cuando copias algo en tu Mac → su cliente detecta el cambio → lo cifra → lo manda al hub → el hub lo reenvía a los demás dispositivos registrados → ellos lo descifran → su cliente lo **escribe al portapapeles del SO** → cuando pegas, ahí está.
 - **El hub nunca ve el contenido en claro.** Está cifrado de extremo a extremo (AES-256 + X25519). Solo los dispositivos registrados pueden descifrar.
 
-Latencia: **~100 ms en LAN.** Para cuando vas con la mano del teclado al trackpad, ya está.
+Latencia: **~150–250 ms en LAN.** El cliente revisa el portapapeles cada 150ms (configurable con `CLIPSYNC_POLL_MS`); a eso se suman ~50ms de red + crypto. Imperceptible cuando vas del teclado al trackpad.
 
 ## Conceptos que necesitas conocer
 
