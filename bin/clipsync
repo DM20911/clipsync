@@ -1,0 +1,146 @@
+#!/usr/bin/env node
+// Unified CLI: clipsync status | switch tray|daemon | register | logs | stop
+import { spawn, execSync } from 'node:child_process';
+import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { inspect, release } from '../client-desktop/src/lock.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(__dirname, '..');
+const platform = process.platform;
+
+const cmd = process.argv[2] || 'status';
+
+function help() {
+  console.log(`ClipSync CLI
+
+Usage:
+  clipsync status              Show current state
+  clipsync switch tray         Stop daemon, start tray app
+  clipsync switch daemon       Stop tray app, install daemon service
+  clipsync register [--qr ...] Register this device with the hub
+  clipsync logs                Tail daemon logs
+  clipsync stop                Stop whichever mode is running
+`);
+}
+
+function status() {
+  const state = (() => {
+    try {
+      return JSON.parse(fs.readFileSync(
+        path.join(os.homedir(), '.config', 'clipsync', 'client', 'state.json'),
+        'utf8'
+      ));
+    } catch { return {}; }
+  })();
+  const lock = inspect();
+  console.log(`ClipSync status
+  Registered:  ${state.jwt ? 'yes' : 'no'}
+  Hub URL:     ${state.hub_url || '(none)'}
+  Device ID:   ${state.device_id?.slice(0, 8) || '(none)'}
+  Cert pinned: ${state.hub_cert_fp ? state.hub_cert_fp.slice(0, 32) + '…' : 'no'}
+  Active mode: ${lock ? lock.mode + ' (pid ' + lock.pid + ')' : 'stopped'}`);
+}
+
+function killActive() {
+  const lock = inspect();
+  if (!lock) return false;
+  try { process.kill(lock.pid, 'SIGTERM'); }
+  catch { release(); return false; }
+  // wait up to 3s
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    try { process.kill(lock.pid, 0); }
+    catch { release(); return true; }
+  }
+  return false;
+}
+
+function startTray() {
+  const trayDir = path.join(ROOT, 'client-tray');
+  if (!fs.existsSync(path.join(trayDir, 'node_modules'))) {
+    console.log('Installing tray dependencies (first run)…');
+    execSync('npm install', { cwd: trayDir, stdio: 'inherit' });
+  }
+  const child = spawn('npx', ['electron', '.'], { cwd: trayDir, detached: true, stdio: 'ignore' });
+  child.unref();
+  console.log('Tray started.');
+}
+
+function stopActive() {
+  if (killActive()) console.log('Stopped.');
+  else console.log('Nothing to stop.');
+}
+
+function installDaemon() {
+  if (platform === 'darwin') {
+    execSync(`bash "${ROOT}/scripts/install-mac.sh" client`, { stdio: 'inherit' });
+  } else if (platform === 'linux') {
+    execSync(`bash "${ROOT}/scripts/install-linux.sh" client`, { stdio: 'inherit' });
+  } else if (platform === 'win32') {
+    console.log('Run as Administrator: powershell.exe -File ' + path.join(ROOT, 'scripts', 'install-win.ps1') + ' -Role client');
+    process.exit(1);
+  }
+}
+function uninstallDaemon() {
+  if (platform === 'darwin') {
+    const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.clipsync.daemon.plist');
+    if (fs.existsSync(plist)) {
+      try { execSync(`launchctl unload "${plist}"`, { stdio: 'ignore' }); } catch {}
+      fs.unlinkSync(plist);
+    }
+  } else if (platform === 'linux') {
+    try { execSync('systemctl --user disable --now clipsync-client.service', { stdio: 'ignore' }); } catch {}
+    const unit = path.join(os.homedir(), '.config', 'systemd', 'user', 'clipsync-client.service');
+    if (fs.existsSync(unit)) fs.unlinkSync(unit);
+  } else if (platform === 'win32') {
+    try { execSync('schtasks /Delete /TN "ClipSync Client" /F', { stdio: 'ignore' }); } catch {}
+  }
+}
+
+function switchMode(mode) {
+  if (mode !== 'tray' && mode !== 'daemon') {
+    console.error('Usage: clipsync switch tray|daemon');
+    process.exit(1);
+  }
+  console.log(`Switching to ${mode} mode…`);
+  killActive();
+  if (mode === 'tray') {
+    uninstallDaemon();
+    startTray();
+  } else {
+    installDaemon();
+  }
+}
+
+function register() {
+  const args = process.argv.slice(3);
+  const child = spawn(process.execPath,
+    [path.join(ROOT, 'client-desktop', 'src', 'register.js'), ...args],
+    { stdio: 'inherit' });
+  child.on('exit', (code) => process.exit(code || 0));
+}
+
+function logs() {
+  if (platform === 'darwin' || platform === 'linux') {
+    const log = path.join(os.homedir(), '.config', 'clipsync', 'client', 'daemon.log');
+    if (!fs.existsSync(log)) { console.log('No daemon log yet.'); return; }
+    spawn('tail', ['-f', log], { stdio: 'inherit' });
+  } else {
+    const log = path.join(os.homedir(), '.config', 'clipsync', 'client', 'daemon.log');
+    if (!fs.existsSync(log)) { console.log('No daemon log yet.'); return; }
+    spawn('powershell.exe', ['-Command', `Get-Content "${log}" -Wait`], { stdio: 'inherit' });
+  }
+}
+
+switch (cmd) {
+  case 'status':   status(); break;
+  case 'switch':   switchMode(process.argv[3]); break;
+  case 'register': register(); break;
+  case 'logs':     logs(); break;
+  case 'stop':     stopActive(); break;
+  case '-h': case '--help': case 'help': help(); break;
+  default: console.error('Unknown command: ' + cmd); help(); process.exit(1);
+}

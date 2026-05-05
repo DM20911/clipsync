@@ -369,7 +369,31 @@ const guessedUrl = `wss://${location.hostname}:5678`;
 if (!state.jwt) $('hub-url').value = guessedUrl;
 
 (async () => {
-  await ensureKeypair();
+  // Browser compat check: X25519 + IndexedDB required
+  const x25519Supported = (() => {
+    try { return typeof crypto?.subtle?.generateKey === 'function'; }
+    catch { return false; }
+  })();
+  if (!x25519Supported || typeof indexedDB === 'undefined') {
+    document.body.innerHTML = `
+      <div style="max-width:600px;margin:80px auto;padding:24px;font-family:system-ui;color:#eee;background:#1e293b;border-radius:8px;">
+        <h2>Browser not supported</h2>
+        <p>ClipSync PWA requires Web Crypto X25519 and IndexedDB.</p>
+        <p>Minimum versions:</p>
+        <ul>
+          <li>Chrome / Edge 113+</li>
+          <li>Firefox 119+</li>
+          <li>Safari 17.4+ (iOS 17.4+)</li>
+        </ul>
+        <p>Update your browser and reload.</p>
+      </div>`;
+    return;
+  }
+  try { await ensureKeypair(); }
+  catch (e) {
+    document.body.innerHTML = `<div style="padding:24px;color:#f66;">Crypto init failed: ${e.message}</div>`;
+    return;
+  }
   if (state.jwt) { showMain(); connect(); }
   else { showRegister(); setStatus('not registered', false); }
 })();

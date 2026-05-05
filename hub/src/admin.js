@@ -1,5 +1,11 @@
 // Admin authentication: token / password / first-device modes + session cookies.
+import crypto from 'node:crypto';
 import { randomToken, timingSafeEqualBuf, sha256Hex } from '../../shared/crypto-node.js';
+
+const SCRYPT_N = 16384, SCRYPT_R = 8, SCRYPT_P = 1, SCRYPT_KEYLEN = 32;
+function scryptHash(password, salt) {
+  return crypto.scryptSync(password, salt, SCRYPT_KEYLEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P });
+}
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 
@@ -27,6 +33,13 @@ export class Admin {
     }
     if (this.mode === 'password') {
       if (!this.password) throw new Error('CLIPSYNC_ADMIN_PASSWORD required in password mode');
+      let salt = this.db.getMeta('admin_pw_salt');
+      if (!salt) {
+        salt = crypto.randomBytes(16).toString('hex');
+        this.db.setMeta('admin_pw_salt', salt);
+      }
+      this.passwordSalt = salt;
+      this.passwordHash = scryptHash(this.password, salt);
     }
     return null;
   }
@@ -39,10 +52,9 @@ export class Admin {
       return timingSafeEqualBuf(a, b);
     }
     if (this.mode === 'password') {
-      if (!this.password || !input) return false;
-      const a = Buffer.from(sha256Hex(this.password), 'hex');
-      const b = Buffer.from(sha256Hex(String(input)), 'hex');
-      return timingSafeEqualBuf(a, b);
+      if (!this.passwordHash || !input) return false;
+      const candidate = scryptHash(String(input), this.passwordSalt);
+      return timingSafeEqualBuf(this.passwordHash, candidate);
     }
     return false;
   }

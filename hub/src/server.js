@@ -45,8 +45,9 @@ log.info('cert fingerprint', { fp: certFp });
 const sockets = new Map();
 const meta    = new WeakMap();
 
-const pushBucket = new TokenBucket({ capacity: 20, refillPerSec: 5 });
-const pinIpCounter = new AttemptCounter({ maxAttempts: 10, windowMs: 60_000 });
+const pushBucket    = new TokenBucket({ capacity: 20, refillPerSec: 5 });
+const historyBucket = new TokenBucket({ capacity: 5,  refillPerSec: 0.5 });
+const pinIpCounter  = new AttemptCounter({ maxAttempts: 10, windowMs: 60_000 });
 
 function listConnected() {
   const out = [];
@@ -110,6 +111,7 @@ setInterval(() => {
   db.pruneHistory(CONFIG.HISTORY_MAX, CONFIG.HISTORY_TTL_MS);
   auth.cleanExpiredPins();
   pushBucket.cleanup();
+  historyBucket.cleanup();
   pinIpCounter.cleanup();
   admin.cleanupSessions();
 }, 5 * 60 * 1000);
@@ -233,6 +235,9 @@ function onMessage(ws, raw, ip) {
     }
 
     case OP.HISTORY_REQ: {
+      if (!historyBucket.consume(m.deviceId, 1)) {
+        return send(ws, { op: OP.ERROR, reason: 'rate_limited' });
+      }
       const limit = Math.min(parseInt(msg.limit ?? 10, 10), 50);
       const rows = db.recentHistory(limit)
         .map((r) => packageHistoryRow(r, m.deviceId))

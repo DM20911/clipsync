@@ -1,0 +1,31 @@
+{
+  "name": "clipsync-tray",
+  "version": "2.0.0",
+  "description": "ClipSync system tray app (Electron)",
+  "type": "module",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "dependencies": {
+    "auto-launch": "^5.0.6"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.clipsync.tray",
+    "productName": "ClipSync",
+    "files": [
+      "src/**/*",
+      "icons/**/*",
+      "../shared/**/*",
+      "../client-desktop/src/**/*"
+    ],
+    "mac": { "category": "public.app-category.utilities", "icon": "icons/icon.icns" },
+    "win": { "icon": "icons/icon.ico" },
+    "linux": { "icon": "icons/icon.png", "target": ["AppImage", "deb"] }
+  }
+}
