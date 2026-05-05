@@ -75,7 +75,9 @@ export class SyncEngine extends EventEmitter {
       },
       onMessage: (m) => this.#handleMessage(m, myPriv),
       onClose: ({ code, reason }) => {
-        this.monitor.stop();
+        // After engine.stop() this.monitor is null. The WS close event may
+        // still fire after that — guard against it.
+        this.monitor?.stop();
         this.emit('disconnected', { code, reason });
       },
     });
