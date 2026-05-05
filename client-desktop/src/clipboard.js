@@ -13,14 +13,19 @@ const exec = promisify(execFile);
 const platform = process.platform;
 
 const POLL_MS = parseInt(process.env.CLIPSYNC_POLL_MS || '150', 10);
+// Skip clipboard images entirely — useful when image sync causes problems
+// (Windows re-encodes PNGs each write, leading to echo loops on big binaries).
+// Text and URLs continue to sync.
+const TEXT_ONLY = process.env.CLIPSYNC_TEXT_ONLY === '1' ||
+                  process.env.CLIPSYNC_TEXT_ONLY === 'true';
 
 export class ClipboardMonitor {
   constructor({ onChange }) {
     this.onChange = onChange;
     this.lastHash = null;
     this.timer = null;
-    this.suppressUntil = 0;
     this.suppressedHashes = new Set();
+    this.pollPausedUntil = 0;   // Skip polling while OS settles after our write
   }
 
   start() {
@@ -28,24 +33,31 @@ export class ClipboardMonitor {
   }
   stop() { if (this.timer) clearInterval(this.timer); }
 
-  // Suppress a hash for 5s — used after we WRITE the clipboard so we don't echo back.
-  // Window must be longer than 2× the poll interval AND survive any OS-side
-  // delayed re-encoding of clipboard contents.
+  // Hash-based suppression — backup defense for OS re-encoding edge cases.
   suppress(hash) {
     this.suppressedHashes.add(hash);
     setTimeout(() => this.suppressedHashes.delete(hash), 5000);
   }
 
   async tick() {
-    // Try image first (a screenshot is also "text" of nothing in many OSes)
-    const img = await readImage().catch(() => null);
-    if (img) {
-      const hash = sha256(img);
-      if (hash !== this.lastHash && !this.suppressedHashes.has(hash)) {
-        this.lastHash = hash;
-        this.onChange({ type: 'image', mime: 'image/png', data: img, checksum: hash });
+    // After a write, give the OS ~2.5s to settle before resuming reads.
+    // This is the primary defense against echo loops: the OS may take a moment
+    // to re-encode the bytes we wrote (especially PNG on Windows) and we don't
+    // want to read that intermediate state and ship it back.
+    if (Date.now() < this.pollPausedUntil) return;
+
+    // Try image first (a screenshot is also "text" of nothing in many OSes).
+    // Skip entirely if TEXT_ONLY is enabled.
+    if (!TEXT_ONLY) {
+      const img = await readImage().catch(() => null);
+      if (img) {
+        const hash = sha256(img);
+        if (hash !== this.lastHash && !this.suppressedHashes.has(hash)) {
+          this.lastHash = hash;
+          this.onChange({ type: 'image', mime: 'image/png', data: img, checksum: hash });
+        }
+        return;
       }
-      return;
     }
 
     let text = '';
@@ -65,10 +77,15 @@ export class ClipboardMonitor {
   }
 
   async write({ type, mime, data }) {
-    // Suppress the original hash AND the post-write hash. The OS may re-encode
-    // (especially PNG images on Windows), so what we read back can differ from
-    // what we wrote — without this, the loop is: A→B writes, B re-reads with a
-    // different hash, broadcasts back to A, A re-reads with yet another hash, etc.
+    // In text-only mode, ignore incoming image clips — don't write them to
+    // the OS clipboard so they can't pollute later text reads.
+    if (TEXT_ONLY && type === 'image') return;
+
+    // Pause polling for 2.5s — primary defense against echo loops.
+    // While paused, the OS finishes re-encoding (PNG metadata on Windows,
+    // tiff↔png conversions on macOS, etc.) without us reading intermediate state.
+    this.pollPausedUntil = Date.now() + 2500;
+
     const originalHash = sha256(data);
     this.suppress(originalHash);
     this.lastHash = originalHash;
@@ -79,7 +96,9 @@ export class ClipboardMonitor {
       await clipboardy.write(data.toString('utf8'));
     }
 
-    // Re-read what the OS actually stored, suppress that too.
+    // After write completes, re-read once and store the OS-canonical hash.
+    // This is a backup: if the OS settles BEFORE the 2.5s pause expires,
+    // suppression by storedHash catches the race.
     try {
       let storedBytes;
       if (type === 'image') {
@@ -95,7 +114,7 @@ export class ClipboardMonitor {
           this.lastHash = storedHash;
         }
       }
-    } catch { /* re-read failed; suppression by originalHash still applies */ }
+    } catch { /* re-read failed; suppression + pause still apply */ }
   }
 }
 
