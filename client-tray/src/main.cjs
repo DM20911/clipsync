@@ -1,7 +1,12 @@
 // Electron entry — boots SyncEngine and renders system tray icon + menu.
-const { app, Tray, Menu, nativeImage, shell, dialog, clipboard, BrowserWindow } = require('electron');
+const { app, Tray, Menu, nativeImage, shell, dialog, clipboard, BrowserWindow, Notification } = require('electron');
 const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
 const AutoLaunch = require('auto-launch');
+
+// Path to the lockfile so we can clear stale ones during restart
+const LOCK_PATH = path.join(os.homedir(), '.config', 'clipsync', 'client', '.lock');
 
 let tray = null;
 let engine = null;
@@ -75,6 +80,17 @@ function buildMenu() {
     },
     { type: 'separator' },
     {
+      label: 'Restart',
+      enabled: lastStatus.registered,
+      click: () => doRestart({ clearClipboard: false }),
+    },
+    {
+      label: 'Restart + clear clipboard',
+      enabled: lastStatus.registered,
+      click: () => doRestart({ clearClipboard: true }),
+    },
+    { type: 'separator' },
+    {
       label: 'Auto-start at login',
       type: 'checkbox',
       checked: false,
@@ -102,6 +118,39 @@ function buildMenu() {
 function refreshTray() {
   setIcon();
   tray.setContextMenu(buildMenu());
+}
+
+// One-click restart — stops engine, releases lockfile, optionally clears
+// the OS clipboard, then relaunches the whole Electron process clean.
+async function doRestart({ clearClipboard = false } = {}) {
+  try {
+    if (clearClipboard) {
+      // Replace whatever's in the clipboard with a tiny string so any
+      // stuck image/text from a previous session gets evicted.
+      try { clipboard.writeText(''); } catch {}
+    }
+    try { engine?.stop(); } catch {}
+    try { lockMod?.release(); } catch {}
+    // Defensive: nuke the lockfile in case a previous instance crashed
+    // without releasing it.
+    try { fs.unlinkSync(LOCK_PATH); } catch {}
+
+    if (Notification.isSupported()) {
+      new Notification({
+        title: 'ClipSync',
+        body: clearClipboard ? 'Reiniciando y limpiando portapapeles…' : 'Reiniciando…',
+        silent: true,
+      }).show();
+    }
+
+    // Relaunch the app. Brief delay so the notification has time to fire.
+    setTimeout(() => {
+      app.relaunch();
+      app.exit(0);
+    }, 250);
+  } catch (e) {
+    dialog.showErrorBox('Restart failed', e.message);
+  }
 }
 
 app.whenReady().then(async () => {
