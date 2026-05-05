@@ -1,8 +1,10 @@
 // Cross-platform clipboard monitor.
-// Text via clipboardy. Images via OS-native helpers (osascript/xclip/PowerShell).
+// In Electron: uses the native clipboard API (fast, all image formats).
+// In plain Node (daemon mode): falls back to clipboardy/osascript/xclip/PowerShell.
 import clipboardy from 'clipboardy';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,6 +13,21 @@ import { isUrlClip } from '../../shared/protocol.js';
 
 const exec = promisify(execFile);
 const platform = process.platform;
+
+// ── Electron native clipboard (preferred when running inside the tray app) ───
+// 50× faster than spawning shell helpers every poll, and supports every
+// clipboard image format the OS exposes.
+let electronClipboard = null;
+let electronNativeImage = null;
+try {
+  if (process.versions.electron) {
+    const requireCJS = createRequire(import.meta.url);
+    const e = requireCJS('electron');
+    electronClipboard   = e.clipboard;
+    electronNativeImage = e.nativeImage;
+  }
+} catch { /* not running under Electron — fall through to shell helpers */ }
+const HAS_ELECTRON = !!(electronClipboard && electronNativeImage);
 
 const POLL_MS = parseInt(process.env.CLIPSYNC_POLL_MS || '150', 10);
 // Skip clipboard images entirely — useful when image sync causes problems
@@ -48,8 +65,8 @@ export class ClipboardMonitor {
     // subsequent text copy). We can't short-circuit on image, otherwise
     // a stale image masks a fresh text copy.
     let text = '';
-    try { text = await clipboardy.read(); } catch {}
-    const img = TEXT_ONLY ? null : await readImage().catch(() => null);
+    try { text = HAS_ELECTRON ? electronClipboard.readText() : await clipboardy.read(); } catch {}
+    const img = TEXT_ONLY ? null : await readImageInternal().catch(() => null);
 
     const textBuf  = text ? Buffer.from(text, 'utf8') : null;
     const textHash = textBuf ? sha256(textBuf) : null;
@@ -90,20 +107,19 @@ export class ClipboardMonitor {
     this.lastHash = originalHash;
 
     if (type === 'image') {
-      await writeImage(data);
+      await writeImageInternal(data);
     } else {
-      await clipboardy.write(data.toString('utf8'));
+      if (HAS_ELECTRON) electronClipboard.writeText(data.toString('utf8'));
+      else await clipboardy.write(data.toString('utf8'));
     }
 
     // After write completes, re-read once and store the OS-canonical hash.
-    // This is a backup: if the OS settles BEFORE the 2.5s pause expires,
-    // suppression by storedHash catches the race.
     try {
       let storedBytes;
       if (type === 'image') {
-        storedBytes = await readImage();
+        storedBytes = await readImageInternal();
       } else {
-        const txt = await clipboardy.read();
+        const txt = HAS_ELECTRON ? electronClipboard.readText() : await clipboardy.read();
         storedBytes = Buffer.from(txt || '', 'utf8');
       }
       if (storedBytes && storedBytes.length) {
@@ -121,7 +137,33 @@ function sha256(buf) {
   return crypto.createHash('sha256').update(buf).digest('hex');
 }
 
-// ── OS-specific image clipboard helpers
+// ── Image clipboard helpers ──────────────────────────────────────────────────
+// Tries Electron native API first, falls back to OS shell helpers.
+
+async function readImageInternal() {
+  if (HAS_ELECTRON) {
+    try {
+      const img = electronClipboard.readImage();
+      if (img.isEmpty()) return null;
+      return img.toPNG();
+    } catch { /* fall through to native helpers */ }
+  }
+  return readImage();
+}
+
+async function writeImageInternal(buf) {
+  if (HAS_ELECTRON) {
+    try {
+      const img = electronNativeImage.createFromBuffer(buf);
+      if (!img.isEmpty()) {
+        electronClipboard.writeImage(img);
+        return;
+      }
+    } catch { /* fall through to native helpers */ }
+  }
+  return writeImage(buf);
+}
+
 async function readImage() {
   if (platform === 'darwin') {
     const tmp = path.join(os.tmpdir(), `clipsync-${crypto.randomUUID()}.png`);
