@@ -20,7 +20,8 @@ export class SyncEngine extends EventEmitter {
     this.client = null;
     this.monitor = null;
     this.paused = false;
-    this.recent = [];   // last N clips (for tray UI)
+    this.recent = [];      // last N clips (for tray UI)
+    this.lastInbound = 0;  // timestamp of last received clip — used to gate outbound during echo windows
   }
 
   isRegistered() {
@@ -101,6 +102,16 @@ export class SyncEngine extends EventEmitter {
     if (data.length > LIMITS.FILE_MAX) return;
     if (this.peers.size === 0) return;
 
+    // Echo-prevention gate: if we received a clip from another device in the
+    // last 3 seconds, suppress outbound publishes during that window. This
+    // catches the case where the OS finishes re-encoding our clipboard write
+    // AFTER our 2.5s polling pause expired — the resulting "change" is not
+    // a real user copy, it's the tail end of our previous receive.
+    if (Date.now() - this.lastInbound < 3000) {
+      this.emit('warn', 'echo_suppressed: ignoring local change shortly after receive');
+      return;
+    }
+
     const contentKey = randomBytes(32);
     const encryptedPayload = encryptAesGcm(contentKey, data);
     const eph = generateX25519();
@@ -146,6 +157,8 @@ export class SyncEngine extends EventEmitter {
         if (c.checksum && sha256Hex(buf) !== c.checksum) {
           this.emit('warn', 'checksum_mismatch'); return;
         }
+        // Mark that we're receiving — gate outbound for the echo window
+        this.lastInbound = Date.now();
         if (!this.paused) {
           this.monitor.write({ type: c.type, mime: c.mime, data: buf })
             .catch((e) => this.emit('warn', 'write_failed: ' + e.message));
