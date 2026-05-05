@@ -1,198 +1,163 @@
+<div align="center">
+
+<img src="assets/logo.png" alt="ClipSync" width="120" />
+
 # ClipSync
 
-Local-network clipboard synchronization. Copy on one device, paste on any other registered device on the same LAN. Text, URLs, and images. End-to-end AES-256-GCM. No cloud.
+**Sincronización de portapapeles entre dispositivos en red local**
+
+`Cmd+C` en una máquina · `Cmd+V` en otra · cifrado de extremo a extremo · sin nube
+
+</div>
+
+---
+
+## Qué hace
+
+Cuando copias texto, una imagen o un link en cualquier dispositivo registrado, aparece automáticamente en el portapapeles de los demás.
 
 ```
-                    Linux
-                      ●
-                      │
-         macOS  ●─────┤─────●  Windows
-                      │
-                    [HUB]            ←  Node.js + WSS + SQLite
-                      │
-            iOS  ●────┴────●  Android
-                  (PWA)       (PWA)
+Mac:           Cmd+C  (copias un link)
+                  ↓ ~100 ms
+PC Windows:    Ctrl+V → ahí está
+iPhone:        ↑ tap "Pegar" → ahí está
 ```
 
-## Components
+No abres ninguna página, no envías nada manualmente. El cliente de cada dispositivo monitorea el portapapeles del sistema operativo y propaga los cambios al instante a través de un hub local.
 
-| Path             | What it is                                                            |
-|------------------|-----------------------------------------------------------------------|
-| `hub/`           | Central server. WSS broker, mDNS announcer, admin dashboard, PWA host |
-| `client-desktop/`| Daemon for macOS / Linux / Windows. Watches the OS clipboard          |
-| `client-pwa/`    | Mobile-friendly PWA (iOS Safari, Android Chrome) served by the hub    |
-| `shared/`        | Shared protocol constants (op codes, limits, subnet checks)           |
-| `scripts/`       | OS-specific install scripts                                           |
+## Características
 
-## Requirements
+- **Multi-plataforma**: macOS, Linux, Windows, iOS y Android (vía PWA)
+- **Solo LAN**: nunca sale de tu red Wi-Fi. Sin cuentas, sin tracking, sin nube
+- **Cifrado E2E**: AES-256-GCM con claves derivadas vía X25519 + HKDF. El hub nunca ve el contenido en claro
+- **Auto-discovery**: mDNS para encontrar el hub sin configurar IPs
+- **TOFU TLS pinning**: el cliente fija la huella digital del certificado del hub en el primer pairing y rechaza cambios
+- **Modos**: tray app (con ícono en la barra de menú) o daemon (servicio sin UI)
+- **Texto, URLs, imágenes y archivos** hasta 50 MB
 
-- Node.js ≥ 20 on every device that runs the hub or desktop client
-- All devices on the same LAN (private subnets only — `192.168/16`, `10/8`, `172.16/12`)
-- Linux clients: `xclip` (X11) or `wl-clipboard` (Wayland) for image-clipboard support
-- A modern browser for the PWA (Chrome / Edge / Safari / Firefox)
+## Arquitectura
+
+```
+                    ┌──────────────┐
+                    │     HUB      │
+                    │  Node.js +   │
+              ┌────▶│  SQLite +    │◀────┐
+              │     │  WSS broker  │     │
+              │     └──────────────┘     │
+              │            ▲             │
+              │            │             │
+        ┌─────┴─┐    ┌─────┴─┐    ┌─────┴─┐
+        │ macOS │    │ Linux │    │ Wind. │
+        │ Tray  │    │ Tray  │    │ Tray  │
+        └───────┘    └───────┘    └───────┘
+                            │
+                            ▼
+                     ┌──────────┐
+                     │   PWA    │ ← iOS / Android
+                     │ (browser)│
+                     └──────────┘
+```
+
+| Componente | Qué hace |
+|------------|----------|
+| `hub/` | Servidor central. WSS broker + mDNS + dashboard admin + sirve la PWA |
+| `client-desktop/` | Núcleo del cliente (motor de sync, monitor de portapapeles, registro) |
+| `client-tray/` | App Electron — ícono en menu bar / system tray con menú |
+| `client-pwa/` | PWA para móvil/tablet (Safari iOS 17.4+, Chrome 113+) |
+| `shared/` | Constantes de protocolo + helpers de crypto compartidos |
+| `bin/clipsync` | CLI unificado (`status`, `switch tray\|daemon`, `register`, `logs`) |
 
 ## Quick start
 
-### 1. Pick a device for the hub and start it
+Una sola máquina hace de **hub** (donde corre el servidor). El resto son clientes que se conectan.
+
+### 1) Levantar el hub
 
 ```bash
-cd hub
+git clone https://github.com/DM20911/clipsync.git
+cd clipsync/hub
 npm install
 npm start
 ```
 
-Output prints the URLs:
+A la primera ejecución imprime un **token de admin** (cópialo, se muestra una sola vez):
 
 ```
-Dashboard:  https://localhost:5679/admin
-PWA:        https://localhost:5679/
-WSS:        wss://localhost:5678
+[clipsync] Admin token (save — shown once):
+[clipsync]   M24CYQAFDxJJD_GagzXtkXlY9Hnl4Zlq_Pt9gRgB-GA
 ```
 
-The hub auto-generates a self-signed TLS cert on first run and announces itself via mDNS as `_clipsync._tcp`.
+Anota también la IP local del hub (`ifconfig` o `ipconfig`).
 
-### 2. Open the dashboard
+### 2) Abrir el dashboard
 
-`https://<hub-ip>:5679/admin` — accept the self-signed cert.
+```
+https://<ip-hub>:5679/admin
+```
 
-Click **+ register new device**. A 6-digit PIN and a QR code appear (PIN expires in 5 min).
+Acepta el certificado self-signed. Login con el token. Click **"+ register new device"** para generar un PIN o QR.
 
-### 3. Register a desktop device
+### 3) Instalar el cliente en cada dispositivo
 
-On any machine that should sync:
+| Dispositivo | Comando | Tutorial |
+|-------------|---------|----------|
+| macOS | `bash scripts/install-mac.sh client` | [docs/tutorials/macos.md](docs/tutorials/macos.md) |
+| Linux | `bash scripts/install-linux.sh client` | [docs/tutorials/linux.md](docs/tutorials/linux.md) |
+| Windows | `.\scripts\install-win.ps1 -Role client` (admin) | [docs/tutorials/windows.md](docs/tutorials/windows.md) |
+| Móvil / Browser | abre `https://<ip-hub>:5679/` | [docs/tutorials/pwa.md](docs/tutorials/pwa.md) |
+
+### 4) Usarlo
+
+`Cmd+C` (Mac/Linux) o `Ctrl+C` (Win) → aparece en los demás dispositivos en ~100ms.
+
+> 📖 **[Manual completo paso a paso](docs/tutorials/README.md)** — qué es, cómo funciona, conceptos, FAQ, troubleshooting
+
+## Modos del cliente desktop
+
+| Modo | Cuándo |
+|------|--------|
+| **Tray** (recomendado) | Equipo personal. Ícono en menu bar, click → estado, peers, recent clips, pause |
+| **Daemon** | Servidor headless (NAS, Raspberry Pi). Servicio del sistema sin UI |
+
+Cambias cuando quieras sin re-registrar:
 
 ```bash
-cd client-desktop
-npm install
-npm run register     # finds the hub via mDNS, asks for the PIN
-npm start            # starts the daemon
+node bin/clipsync switch tray
+node bin/clipsync switch daemon
+node bin/clipsync status
 ```
 
-That's it — copy something on either machine; it appears on the other.
+## Modelo de seguridad
 
-### 4. Register a mobile device (PWA)
+- **Cifrado per-device**: cada dispositivo genera un keypair X25519 al registrarse. Para enviar un clip, el emisor genera una clave de contenido aleatoria, cifra el payload con AES-256-GCM, y envuelve esa clave por destinatario usando ECDH(X25519) → HKDF-SHA256 → AES-GCM-wrap. El hub almacena el bundle pero no puede descifrar nada.
+- **Revocación real**: revocar un dispositivo elimina su pubkey de la lista de destinatarios. Clips futuros nunca se cifran para él.
+- **Admin auth**: token aleatorio impreso en consola (default), `CLIPSYNC_ADMIN_PASSWORD` con scrypt, o "primer dispositivo registrado = admin"
+- **Rate limiting**: token-bucket en `PUSH` y `HISTORY_REQ`, attempt counter por IP en login y registro
+- **TOFU pinning** del cert TLS del hub en clientes desktop
+- **CSP estricto** en HTML servido por el hub
+- **JTI revocation cascade** al revocar un dispositivo
 
-1. On the phone, open `https://<hub-ip>:5679/` and accept the cert
-2. From the dashboard, generate a PIN
-3. In the PWA, paste the hub URL (`wss://<hub-ip>:5678`) and the PIN, tap **register**
-4. Tap **Add to Home Screen** to install the PWA
+Ver [docs/superpowers/specs/2026-05-04-security-mitigations-and-tutorials-design.md](docs/superpowers/specs/2026-05-04-security-mitigations-and-tutorials-design.md) para el modelo completo.
 
-iOS note: Safari does not allow PWAs to read the clipboard automatically. Use the **paste from clipboard** button in the PWA, or rely on the **Share Sheet** (the PWA registers as a share target).
+## Requisitos
 
-### 5. Install as a system service (optional)
+- Node.js ≥ 18 (recomendado 20 LTS) en hub y clientes desktop
+- macOS 12+, Linux con systemd, Windows 10+
+- Browser moderno con Web Crypto X25519 + IndexedDB para PWA (Chrome 113+, Firefox 119+, Safari 17.4+)
+- Todas las máquinas en la misma red privada (RFC1918 — `192.168/16`, `10/8`, `172.16/12`)
 
-```bash
-# macOS — installs LaunchAgent(s)
-./scripts/install-mac.sh hub        # only the hub
-./scripts/install-mac.sh client     # only the daemon
-./scripts/install-mac.sh both
+## Stack técnico
 
-# Linux (systemd user units)
-./scripts/install-linux.sh both
+- **Hub**: Node.js, `ws`, `better-sqlite3`, `node-forge` (TLS), `qrcode`, mDNS via `multicast-dns`
+- **Cliente desktop**: Node.js, `clipboardy`, `ws`, helpers de OS para imágenes (osascript / wl-clipboard / xclip / PowerShell)
+- **Tray**: Electron + `auto-launch`
+- **PWA**: HTML/JS vanilla + Web Crypto API + IndexedDB + Tailwind CDN
+- **Crypto**: `node:crypto` (X25519 nativo), HKDF-SHA256, AES-256-GCM
 
-# Windows (PowerShell, Task Scheduler at logon)
-.\scripts\install-win.ps1 -Role both
-```
+## Licencia
 
-## Architecture
+MIT
 
-### Topology
+---
 
-Hub-and-spoke. One hub (Node.js); every other device is a client over WSS. The hub:
-
-- terminates WSS for all clients
-- broadcasts incoming clips to every other authenticated client
-- persists the last 50 clips for 24 h in SQLite (encrypted payloads only — the hub never sees plaintext)
-- announces itself via mDNS so clients discover it without manual IPs
-
-### Encryption
-
-- Hub generates a single **network key** on first boot (random 64-byte secret, stored in `meta`)
-- On registration, every device receives this network key
-- Clipboard payloads are encrypted client-side with **AES-256-GCM**, key derived from the network key via **PBKDF2 (100k iterations, SHA-256, random per-message salt)**
-- The hub stores and forwards the encrypted base64 blobs as-is. It can read metadata (type, size, mime, checksum) but not contents.
-- Layout: `salt(16) | iv(12) | tag(16) | ciphertext`
-
-### Authentication
-
-- First connection from a new device requires a **6-digit PIN** issued from the hub UI (single-use, 5-min TTL)
-- Hub then issues a **JWT (HS256, 30-day expiry)** signed with a per-installation server secret
-- Server secret rotates automatically every 30 days
-- Tokens carry a `jti` and can be individually revoked from the dashboard
-
-### Network isolation
-
-- The hub rejects WS / HTTP connections from any IP outside the configured private CIDR list (`192.168.0.0/16`, `10.0.0.0/8`, `172.16.0.0/12`, `127/8`)
-- Self-signed TLS cert covers `localhost`, the hostname, and every local non-loopback IPv4
-
-### Loop prevention
-
-- Each client hashes (SHA-256) outgoing clipboard contents and ignores incoming broadcasts whose hash matches
-- After writing a remote clip to the local clipboard, the source hash is suppressed for 1.5 s
-
-## WebSocket protocol
-
-All messages are JSON. Connect to `wss://<hub>:<port>` then:
-
-```jsonc
-// client → hub
-{ "op": "auth",  "token": "<jwt>" }
-{ "op": "register", "pin": "123456", "name": "...", "os": "darwin", "fingerprint": null }
-{ "op": "push", "clip": { "id": "...", "type": "text|image|url|file",
-                          "mime": "...", "size": 1234, "timestamp": 0,
-                          "checksum": "sha256...", "payload_b64": "..." } }
-{ "op": "ping" }
-{ "op": "history_request", "limit": 10 }
-
-// hub → client
-{ "op": "auth_ok",   "device_id": "...", "devices": [...] }
-{ "op": "auth_fail", "reason": "..." }
-{ "op": "register_ok", "device_id": "...", "token": "<network-key>", "jwt": "..." }
-{ "op": "broadcast", "clip": { ... } }
-{ "op": "history",   "items": [ ... ] }
-{ "op": "device_joined", "device": { "id": "...", "name": "...", "os": "..." } }
-{ "op": "device_left",   "device_id": "..." }
-{ "op": "pong", "t": 0 }
-```
-
-## Limits
-
-| Type      | Max size |
-|-----------|----------|
-| Text / URL| 1 MB     |
-| Image     | 10 MB    |
-| File      | 50 MB    |
-
-History: 50 items / 24 h (configurable via env vars).
-
-## Configuration
-
-Copy `.env.example` to `.env` and edit, or export the variables in your shell. See the file for the full list.
-
-## Tests
-
-```bash
-cd hub
-npm test
-```
-
-Covers `crypto.js`, `auth.js`, and the shared `protocol.js`.
-
-## Troubleshooting
-
-- **Self-signed cert warning** in the browser. Expected. Accept once per device.
-- **mDNS fails on Windows.** Some firewalls block UDP 5353. Either allow it, or pass the hub URL manually to `clipsync register`.
-- **iOS PWA does not read the clipboard.** Browser security. Use the `paste from clipboard` button or the share sheet.
-- **Linux: image clipboard does nothing.** Install `xclip` (X11) or `wl-clipboard` (Wayland).
-- **Hub is reachable but client never connects.** Check the IP is in a private CIDR; the hub rejects public IPs by design.
-- **Logs.** Hub: `~/.config/clipsync/hub/hub.log` (rotates at 10 MB × 3). LaunchAgent: `~/Library/Logs/clipsync-*.log`.
-
-## Security notes
-
-- The network key is shared by all registered devices; revoking a single device does NOT rotate the key. To rotate, delete `meta.network_key` from the SQLite DB and re-register every device.
-- The hub never logs payload contents — only metadata (type, size, source, timestamp).
-- TLS is self-signed and intended for LAN use only. Do not expose ClipSync to the public internet.
-
-## License
-
-MIT.
+Herramienta desarrollada por [DM20911](https://github.com/DM20911) — [OptimizarIA Consulting SPA](https://optimizaria.com)
