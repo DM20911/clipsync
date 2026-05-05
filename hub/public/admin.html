@@ -71,6 +71,9 @@
     </div>
   </header>
 
+  <!-- Live architecture visualization -->
+  <section id="arch-mount"></section>
+
   <!-- Stats row -->
   <section class="grid grid-cols-1 md:grid-cols-4 gap-4">
     <div class="bg-slate-900/60 border border-slate-800 rounded-lg p-4">
@@ -266,6 +269,20 @@ function dashboard() {
     timer: null,
 
     async init() {
+      // Load architecture viz fragment into #arch-mount
+      try {
+        const r = await fetch('/admin/architecture.html');
+        if (r.ok) document.getElementById('arch-mount').innerHTML = await r.text();
+      } catch {}
+      // Re-execute inline scripts that came in via innerHTML (browsers don't auto-run them)
+      const mount = document.getElementById('arch-mount');
+      mount.querySelectorAll('script').forEach((old) => {
+        const n = document.createElement('script');
+        for (const a of old.attributes) n.setAttribute(a.name, a.value);
+        n.textContent = old.textContent;
+        old.replaceWith(n);
+      });
+
       await this.refresh();
       this.connectSse();
       setInterval(() => this.tickPin(), 1000);
@@ -283,6 +300,7 @@ function dashboard() {
         this.devices = s.devices || [];
         this.allDevices = (d.devices || []).filter(x => !x.revoked);
         this.history = h.items || [];
+        if (window.ArchViz) window.ArchViz.setDevices(this.devices);
       } catch (e) { console.error(e); }
     },
 
@@ -295,6 +313,11 @@ function dashboard() {
         ev._t = Date.now();
         this.events.push(ev);
         if (this.events.length > 200) this.events.splice(0, this.events.length - 200);
+        if (ev.kind === 'clip' && window.ArchViz) {
+          // Resolve the OS of the sender from current devices
+          const sender = (this.devices || []).find(d => d.id === ev.from);
+          window.ArchViz.onClipEvent({ from_os: sender?.os || '' });
+        }
         if (['device_connected','device_disconnected','device_registered','device_revoked','clip','history_cleared'].includes(ev.kind)) {
           this.refresh();
         }

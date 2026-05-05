@@ -1,0 +1,213 @@
+<!doctype html>
+<!-- Animated architecture diagram for the admin dashboard.
+     Reactive to live SSE events: device_connected/disconnected lights up nodes,
+     clip events trigger a pulse traveling sender → hub → all receivers. -->
+<style>
+  .arch-card { background: #0b0f1a; border: 1px solid #1e293b; border-radius: 12px; padding: 16px; }
+  .arch-card h2 { font: 600 11px/1 ui-monospace, monospace; letter-spacing: .15em;
+                  text-transform: uppercase; color: #cbd5e1; margin: 0 0 12px; }
+  .arch-svg { display: block; width: 100%; height: auto; }
+
+  .node { transition: filter .25s ease, opacity .25s ease; opacity: .55; }
+  .node.online { opacity: 1; filter: drop-shadow(0 0 6px currentColor); }
+  .node-label { font: 600 11px ui-monospace, monospace; fill: #cbd5e1; }
+  .node-sub   { font: 400 9px ui-monospace, monospace; fill: #64748b; }
+
+  .link { stroke-dasharray: 4 6; stroke-dashoffset: 0; opacity: .35;
+          animation: dash 6s linear infinite; transition: opacity .25s ease; }
+  .link.active { opacity: .9; }
+  @keyframes dash { to { stroke-dashoffset: -120; } }
+
+  .hub-octagon { fill: #f59e0b; filter: drop-shadow(0 0 8px rgba(245,158,11,.55)); }
+  .hub-glow { fill: rgba(245,158,11,.12); animation: hub-pulse 3s ease-in-out infinite; }
+  @keyframes hub-pulse { 50% { transform: scale(1.15); opacity: .5; } }
+
+  .pulse { fill: #fff; r: 4; pointer-events: none; }
+</style>
+
+<div class="arch-card">
+  <h2>Live topology</h2>
+  <svg id="arch" class="arch-svg" viewBox="0 0 800 500" xmlns="http://www.w3.org/2000/svg">
+    <!-- Connection lines -->
+    <g id="links">
+      <line class="link" id="link-mac"     x1="400" y1="250" x2="180" y2="220" stroke="#22d3ee" stroke-width="2"/>
+      <line class="link" id="link-linux"   x1="400" y1="250" x2="400" y2="90"  stroke="#22d3ee" stroke-width="2"/>
+      <line class="link" id="link-windows" x1="400" y1="250" x2="620" y2="220" stroke="#22d3ee" stroke-width="2"/>
+      <line class="link" id="link-ios"     x1="400" y1="250" x2="280" y2="430" stroke="#a78bfa" stroke-width="2"/>
+      <line class="link" id="link-android" x1="400" y1="250" x2="520" y2="430" stroke="#a78bfa" stroke-width="2"/>
+    </g>
+
+    <!-- Hub (center, octagon-ish) -->
+    <g transform="translate(400 250)">
+      <circle class="hub-glow" r="48"/>
+      <polygon class="hub-octagon"
+               points="-22,-14 -14,-22 14,-22 22,-14 22,14 14,22 -14,22 -22,14"/>
+      <text y="4" text-anchor="middle" font="700 11px ui-monospace,monospace" fill="#0b0f1a">HUB</text>
+    </g>
+
+    <!-- Nodes -->
+    <g class="node" id="node-mac" transform="translate(180 220)" style="color:#22d3ee">
+      <circle r="22" fill="rgba(34,211,238,.15)" stroke="#22d3ee" stroke-width="2"/>
+      <circle r="6" fill="#22d3ee"/>
+      <text class="node-label" y="-32" text-anchor="middle">macOS</text>
+      <text class="node-sub"   y="42"  text-anchor="middle">daemon</text>
+    </g>
+    <g class="node" id="node-linux" transform="translate(400 90)" style="color:#22d3ee">
+      <circle r="22" fill="rgba(34,211,238,.15)" stroke="#22d3ee" stroke-width="2"/>
+      <circle r="6" fill="#22d3ee"/>
+      <text class="node-label" y="-32" text-anchor="middle">Linux</text>
+      <text class="node-sub"   y="42"  text-anchor="middle">daemon</text>
+    </g>
+    <g class="node" id="node-windows" transform="translate(620 220)" style="color:#22d3ee">
+      <circle r="22" fill="rgba(34,211,238,.15)" stroke="#22d3ee" stroke-width="2"/>
+      <circle r="6" fill="#22d3ee"/>
+      <text class="node-label" y="-32" text-anchor="middle">Windows</text>
+      <text class="node-sub"   y="42"  text-anchor="middle">daemon</text>
+    </g>
+    <g class="node" id="node-ios" transform="translate(280 430)" style="color:#a78bfa">
+      <circle r="20" fill="rgba(167,139,250,.15)" stroke="#a78bfa" stroke-width="2"/>
+      <circle r="5" fill="#a78bfa"/>
+      <text class="node-label" y="-30" text-anchor="middle">iOS</text>
+      <text class="node-sub"   y="38"  text-anchor="middle">PWA</text>
+    </g>
+    <g class="node" id="node-android" transform="translate(520 430)" style="color:#a78bfa">
+      <circle r="20" fill="rgba(167,139,250,.15)" stroke="#a78bfa" stroke-width="2"/>
+      <circle r="5" fill="#a78bfa"/>
+      <text class="node-label" y="-30" text-anchor="middle">Android</text>
+      <text class="node-sub"   y="38"  text-anchor="middle">PWA</text>
+    </g>
+
+    <!-- Pulse layer (clip events) -->
+    <g id="pulses"></g>
+  </svg>
+
+  <div style="margin-top:10px; display:flex; gap:18px; font: 400 10px ui-monospace,monospace; color:#64748b">
+    <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22d3ee;margin-right:4px"></span>Desktop</span>
+    <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#a78bfa;margin-right:4px"></span>Mobile PWA</span>
+    <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#f59e0b;margin-right:4px"></span>Hub</span>
+    <span style="margin-left:auto" id="arch-counter">0 active</span>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const NODE_POS = {
+    mac:     { x: 180, y: 220, link: 'link-mac',     node: 'node-mac' },
+    linux:   { x: 400, y: 90,  link: 'link-linux',   node: 'node-linux' },
+    windows: { x: 620, y: 220, link: 'link-windows', node: 'node-windows' },
+    ios:     { x: 280, y: 430, link: 'link-ios',     node: 'node-ios' },
+    android: { x: 520, y: 430, link: 'link-android', node: 'node-android' },
+  };
+  const HUB = { x: 400, y: 250 };
+
+  function osBucket(os) {
+    if (!os) return 'mac';
+    const o = String(os).toLowerCase();
+    if (o.includes('darwin') || o.includes('mac')) return 'mac';
+    if (o.includes('win'))                          return 'windows';
+    if (o.includes('linux'))                        return 'linux';
+    if (o.includes('iphone') || o.includes('ipad') || o.includes('ios')) return 'ios';
+    if (o.includes('android'))                      return 'android';
+    return 'mac';
+  }
+
+  // Track which device buckets are currently active
+  const active = new Set();
+
+  function setActive(bucket, on) {
+    if (on) active.add(bucket); else active.delete(bucket);
+    const node = $(NODE_POS[bucket]?.node);
+    const link = $(NODE_POS[bucket]?.link);
+    if (node) node.classList.toggle('online', on);
+    if (link) link.classList.toggle('active', on);
+    const counter = $('arch-counter');
+    if (counter) counter.textContent = active.size + ' active';
+  }
+
+  function pulseTo(bucket, color = '#fff') {
+    const target = NODE_POS[bucket];
+    if (!target) return;
+    const svgNs = 'http://www.w3.org/2000/svg';
+    const c = document.createElementNS(svgNs, 'circle');
+    c.setAttribute('class', 'pulse');
+    c.setAttribute('fill', color);
+    c.setAttribute('r', '5');
+    c.setAttribute('cx', HUB.x);
+    c.setAttribute('cy', HUB.y);
+    $('pulses').appendChild(c);
+    const dur = 600;
+    const start = performance.now();
+    function frame(t) {
+      const p = Math.min(1, (t - start) / dur);
+      c.setAttribute('cx', HUB.x + (target.x - HUB.x) * p);
+      c.setAttribute('cy', HUB.y + (target.y - HUB.y) * p);
+      c.setAttribute('opacity', 1 - p * 0.7);
+      if (p < 1) requestAnimationFrame(frame);
+      else c.remove();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  function pulseFromHub() {
+    // visual: pulse that travels FROM a sender to the hub
+    // (reverse of pulseTo) — used to indicate inbound clip from a device
+  }
+  function pulseFromTo(fromBucket, toBucket = null) {
+    const src = NODE_POS[fromBucket];
+    if (!src) return;
+    const svgNs = 'http://www.w3.org/2000/svg';
+    const c = document.createElementNS(svgNs, 'circle');
+    c.setAttribute('class', 'pulse');
+    c.setAttribute('fill', '#fbbf24');
+    c.setAttribute('r', '5');
+    c.setAttribute('cx', src.x);
+    c.setAttribute('cy', src.y);
+    $('pulses').appendChild(c);
+    const dur = 500;
+    const start = performance.now();
+    function frame(t) {
+      const p = Math.min(1, (t - start) / dur);
+      c.setAttribute('cx', src.x + (HUB.x - src.x) * p);
+      c.setAttribute('cy', src.y + (HUB.y - src.y) * p);
+      c.setAttribute('opacity', 1 - p * 0.5);
+      if (p < 1) requestAnimationFrame(frame);
+      else {
+        c.remove();
+        // After arriving at hub, fan out to all OTHER active nodes
+        for (const b of active) {
+          if (b !== fromBucket) pulseTo(b, '#fbbf24');
+        }
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+
+  // Public API to be wired by the dashboard
+  window.ArchViz = {
+    setDevices(devices) {
+      // Clear current active set
+      for (const b of [...active]) setActive(b, false);
+      // Light up buckets present in the device list
+      const seen = new Set();
+      for (const d of devices) {
+        const b = osBucket(d.os);
+        if (!seen.has(b)) {
+          setActive(b, true);
+          seen.add(b);
+        }
+      }
+    },
+    onClipEvent({ from_os }) {
+      pulseFromTo(osBucket(from_os));
+    },
+  };
+
+  // Idle ambient pulse so it never feels "dead"
+  setInterval(() => {
+    if (active.size === 0) return;
+    const arr = [...active];
+    pulseFromTo(arr[Math.floor(Math.random() * arr.length)]);
+  }, 4500);
+})();
+</script>
