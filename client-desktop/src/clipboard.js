@@ -41,39 +41,38 @@ export class ClipboardMonitor {
 
   async tick() {
     // After a write, give the OS ~2.5s to settle before resuming reads.
-    // This is the primary defense against echo loops: the OS may take a moment
-    // to re-encode the bytes we wrote (especially PNG on Windows) and we don't
-    // want to read that intermediate state and ship it back.
     if (Date.now() < this.pollPausedUntil) return;
 
-    // Try image first (a screenshot is also "text" of nothing in many OSes).
-    // Skip entirely if TEXT_ONLY is enabled.
-    if (!TEXT_ONLY) {
-      const img = await readImage().catch(() => null);
-      if (img) {
-        const hash = sha256(img);
-        if (hash !== this.lastHash && !this.suppressedHashes.has(hash)) {
-          this.lastHash = hash;
-          this.onChange({ type: 'image', mime: 'image/png', data: img, checksum: hash });
-        }
-        return;
-      }
-    }
-
+    // Read BOTH text and image representations. The OS may keep both
+    // simultaneously (e.g. macOS sometimes preserves an image even after a
+    // subsequent text copy). We can't short-circuit on image, otherwise
+    // a stale image masks a fresh text copy.
     let text = '';
-    try { text = await clipboardy.read(); } catch { return; }
-    if (!text) return;
-    const buf = Buffer.from(text, 'utf8');
-    const hash = sha256(buf);
-    if (hash === this.lastHash || this.suppressedHashes.has(hash)) return;
-    this.lastHash = hash;
-    const type = isUrlClip(text) ? 'url' : 'text';
-    this.onChange({
-      type,
-      mime: type === 'url' ? 'text/uri-list' : 'text/plain',
-      data: buf,
-      checksum: hash,
-    });
+    try { text = await clipboardy.read(); } catch {}
+    const img = TEXT_ONLY ? null : await readImage().catch(() => null);
+
+    const textBuf  = text ? Buffer.from(text, 'utf8') : null;
+    const textHash = textBuf ? sha256(textBuf) : null;
+    const imgHash  = img ? sha256(img) : null;
+
+    // Pick whichever representation is NEW (differs from lastHash and isn't suppressed).
+    // If both are new (rare), image wins because image clipboard events are usually
+    // what the user just copied (text often lingers from before).
+    if (imgHash && imgHash !== this.lastHash && !this.suppressedHashes.has(imgHash)) {
+      this.lastHash = imgHash;
+      this.onChange({ type: 'image', mime: 'image/png', data: img, checksum: imgHash });
+      return;
+    }
+    if (textHash && textHash !== this.lastHash && !this.suppressedHashes.has(textHash)) {
+      this.lastHash = textHash;
+      const type = isUrlClip(text) ? 'url' : 'text';
+      this.onChange({
+        type,
+        mime: type === 'url' ? 'text/uri-list' : 'text/plain',
+        data: textBuf,
+        checksum: textHash,
+      });
+    }
   }
 
   async write({ type, mime, data }) {
