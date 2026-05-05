@@ -126,27 +126,41 @@
 
       <!-- Register new device -->
       <div class="mt-6 pt-5 border-t border-slate-800">
-        <button @click="generateQR()"
-                class="px-4 py-2 bg-amber-500/10 border border-amber-500/40 rounded text-amber-300 hover:bg-amber-500/20 mono text-sm">
-          + register new device
-        </button>
-        <div x-show="qr" class="mt-4 p-4 bg-slate-950 border border-slate-800 rounded flex items-center gap-6">
-          <img :src="qr" class="w-40 h-40 rounded bg-white p-2" alt="QR" />
-          <div class="flex-1 min-w-0">
-            <div class="text-xs uppercase text-slate-500 tracking-wider">PIN</div>
-            <div class="mono text-3xl tracking-widest text-amber-400" x-text="pin"></div>
-            <div class="mono text-xs text-slate-500 mt-1">expires in <span x-text="pinCountdown"></span>s</div>
-
-            <div class="mt-4 text-xs uppercase text-slate-500 tracking-wider">Scan from phone</div>
-            <a class="mono text-xs text-amber-300 hover:underline break-all"
-               :href="qrUrl" x-text="qrUrl" target="_blank"></a>
-
-            <div class="mt-3 text-xs uppercase text-slate-500 tracking-wider">Or paste in CLI</div>
-            <code class="mono text-[10px] text-slate-400 break-all block mt-1"
-                  x-text="`node client-desktop/src/register.js --qr '${qrPayload}'`"></code>
-          </div>
+        <div class="flex items-center gap-3">
+          <button @click="generateQR()" :disabled="qrLoading"
+                  class="px-4 py-2 bg-amber-500/10 border border-amber-500/40 rounded text-amber-300 hover:bg-amber-500/20 disabled:opacity-50 mono text-sm">
+            <span x-text="qrLoading ? 'generating…' : '+ register new device'"></span>
+          </button>
+          <span x-show="qrState !== 'idle'" class="mono text-xs text-slate-500">
+            state: <span x-text="qrState" :class="qrState === 'error' ? 'text-rose-400' : qrState === 'ready' ? 'text-emerald-400' : 'text-amber-400'"></span>
+          </span>
         </div>
-        <div x-show="qrError" class="mt-4 p-3 bg-rose-950/30 border border-rose-800 rounded text-sm text-rose-300" x-text="qrError"></div>
+
+        <template x-if="qrState === 'error'">
+          <div class="mt-4 p-3 bg-rose-950/30 border border-rose-800 rounded text-sm text-rose-300">
+            <div class="font-medium">Error: <span x-text="qrError"></span></div>
+            <div class="mt-2 text-xs text-rose-400/80">HTTP <span x-text="qrDebug.status || '—'"></span> · <span x-text="qrDebug.detail || ''"></span></div>
+          </div>
+        </template>
+
+        <template x-if="qrState === 'ready'">
+          <div class="mt-4 p-4 bg-slate-950 border border-slate-800 rounded flex items-center gap-6">
+            <img :src="qr" class="w-40 h-40 rounded bg-white p-2" alt="QR code" />
+            <div class="flex-1 min-w-0">
+              <div class="text-xs uppercase text-slate-500 tracking-wider">PIN</div>
+              <div class="mono text-3xl tracking-widest text-amber-400" x-text="pin"></div>
+              <div class="mono text-xs text-slate-500 mt-1">expires in <span x-text="pinCountdown"></span>s</div>
+
+              <div class="mt-4 text-xs uppercase text-slate-500 tracking-wider">Scan from phone</div>
+              <a class="mono text-xs text-amber-300 hover:underline break-all"
+                 :href="qrUrl" x-text="qrUrl" target="_blank"></a>
+
+              <div class="mt-3 text-xs uppercase text-slate-500 tracking-wider">Or paste in CLI</div>
+              <code class="mono text-[10px] text-slate-400 break-all block mt-1"
+                    x-text="`node client-desktop/src/register.js --qr '${qrPayload}'`"></code>
+            </div>
+          </div>
+        </template>
       </div>
     </section>
 
@@ -199,7 +213,12 @@ function dashboard() {
     allDevices: [],         // registered (online + offline)
     history: [],
     events: [],
-    qr: null, pin: null, qrPayload: null, qrUrl: null, qrError: null, pinExp: 0, pinCountdown: 0,
+    qr: null, pin: null, qrPayload: null, qrUrl: null,
+    qrState: 'idle',   // idle | loading | ready | error
+    qrLoading: false,
+    qrError: null,
+    qrDebug: { status: null, detail: '' },
+    pinExp: 0, pinCountdown: 0,
     connected: false,
     timer: null,
 
@@ -242,34 +261,60 @@ function dashboard() {
     isOnline(id) { return this.devices.some(d => d.id === id); },
 
     async generateQR() {
-      // Clear any stale state first
-      this.qr = null; this.pin = null; this.qrPayload = null;
-      this.qrUrl = null; this.pinExp = 0; this.pinCountdown = 0;
+      // Reset all QR-related state
+      this.qr = null; this.pin = null; this.qrPayload = null; this.qrUrl = null;
+      this.pinExp = 0; this.pinCountdown = 0;
       this.qrError = null;
+      this.qrDebug = { status: null, detail: '' };
+      this.qrLoading = true;
+      this.qrState = 'loading';
+
       try {
-        const res = await fetch('/api/qr', { credentials: 'include' });
+        const res = await fetch('/api/qr', { credentials: 'include', cache: 'no-store' });
+        this.qrDebug.status = res.status;
+
         if (!res.ok) {
-          const e = await res.json().catch(() => ({}));
+          let bodyText = '';
+          try { bodyText = await res.text(); } catch {}
+          this.qrDebug.detail = bodyText.slice(0, 200);
           if (res.status === 401) {
-            this.qrError = 'No estás autenticado como admin. Recarga la página y vuelve a iniciar sesión.';
-            setTimeout(() => location.reload(), 1500);
+            this.qrError = 'no estás autenticado como admin (401). Recarga la página.';
+            setTimeout(() => location.reload(), 2000);
           } else {
-            this.qrError = `failed (${res.status}): ${e.error || res.statusText}`;
+            this.qrError = `HTTP ${res.status} ${res.statusText}`;
           }
+          this.qrState = 'error';
           return;
         }
-        const r = await res.json();
-        if (!r.qr || !r.pin) {
-          this.qrError = 'respuesta inválida del hub';
+
+        let r;
+        try { r = JSON.parse(await res.text()); }
+        catch (parseErr) {
+          this.qrError = 'respuesta no es JSON válido';
+          this.qrDebug.detail = parseErr.message;
+          this.qrState = 'error';
           return;
         }
+
+        if (!r.qr || !r.pin || !r.url) {
+          this.qrError = 'respuesta incompleta del hub (faltan campos)';
+          this.qrDebug.detail = 'keys: ' + Object.keys(r).join(',');
+          this.qrState = 'error';
+          return;
+        }
+
         this.qr = r.qr;
         this.pin = r.pin;
         this.qrPayload = r.payload;
         this.qrUrl = r.url;
         this.pinExp = r.expiresAt;
+        this.qrState = 'ready';
       } catch (e) {
-        this.qrError = 'network error: ' + e.message;
+        this.qrError = 'network error';
+        this.qrDebug.detail = e.message;
+        this.qrState = 'error';
+      } finally {
+        this.qrLoading = false;
       }
     },
 
@@ -277,7 +322,10 @@ function dashboard() {
       if (!this.pinExp) return;
       const left = Math.max(0, Math.floor((this.pinExp - Date.now())/1000));
       this.pinCountdown = left;
-      if (left === 0) { this.qr = null; this.pin = null; this.pinExp = 0; }
+      if (left === 0) {
+        this.qr = null; this.pin = null; this.pinExp = 0;
+        this.qrState = 'idle';
+      }
     },
 
     async revoke(id) {

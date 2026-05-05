@@ -292,7 +292,6 @@ export class Routes {
     stream.on('open', () => {
       const headers = { 'content-type': MIME[ext] || 'application/octet-stream' };
       if (ext === '.html') {
-        // CSP: own origin + WSS; allow inline styles for current admin UI; allow CDN scripts (tailwind/alpine)
         headers['content-security-policy'] =
           "default-src 'self'; " +
           "script-src 'self' https://cdn.tailwindcss.com https://unpkg.com 'unsafe-inline'; " +
@@ -303,6 +302,10 @@ export class Routes {
         headers['x-content-type-options'] = 'nosniff';
         headers['x-frame-options'] = 'DENY';
         headers['referrer-policy'] = 'no-referrer';
+        headers['cache-control'] = 'no-cache, no-store, must-revalidate';
+        headers['pragma'] = 'no-cache';
+      } else if (ext === '.js' || ext === '.css') {
+        headers['cache-control'] = 'no-cache';
       }
       res.writeHead(200, headers);
       stream.pipe(res);
