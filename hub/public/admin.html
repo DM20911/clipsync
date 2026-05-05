@@ -124,44 +124,87 @@
         <div x-show="!allDevices.length" class="text-slate-500 text-sm py-4 text-center">no devices yet</div>
       </div>
 
-      <!-- Register new device -->
+      <!-- Register new device — vanilla JS, no Alpine dependency -->
       <div class="mt-6 pt-5 border-t border-slate-800">
-        <div class="flex items-center gap-3">
-          <button @click="generateQR()" :disabled="qrLoading"
-                  class="px-4 py-2 bg-amber-500/10 border border-amber-500/40 rounded text-amber-300 hover:bg-amber-500/20 disabled:opacity-50 mono text-sm">
-            <span x-text="qrLoading ? 'generating…' : '+ register new device'"></span>
-          </button>
-          <span x-show="qrState !== 'idle'" class="mono text-xs text-slate-500">
-            state: <span x-text="qrState" :class="qrState === 'error' ? 'text-rose-400' : qrState === 'ready' ? 'text-emerald-400' : 'text-amber-400'"></span>
-          </span>
+        <button id="qr-btn" type="button"
+                class="px-4 py-2 bg-amber-500/10 border border-amber-500/40 rounded text-amber-300 hover:bg-amber-500/20 mono text-sm">
+          + register new device
+        </button>
+        <div id="qr-error" style="display:none" class="mt-4 p-3 bg-rose-950/30 border border-rose-800 rounded text-sm text-rose-300"></div>
+        <div id="qr-result" style="display:none" class="mt-4 p-4 bg-slate-950 border border-slate-800 rounded flex items-center gap-6">
+          <img id="qr-img" class="w-40 h-40 rounded bg-white p-2" alt="QR code" />
+          <div class="flex-1 min-w-0">
+            <div class="text-xs uppercase text-slate-500 tracking-wider">PIN</div>
+            <div id="qr-pin" class="mono text-3xl tracking-widest text-amber-400"></div>
+            <div class="mono text-xs text-slate-500 mt-1">expires in <span id="qr-countdown">—</span>s</div>
+            <div class="mt-4 text-xs uppercase text-slate-500 tracking-wider">Scan from phone</div>
+            <a id="qr-url" class="mono text-xs text-amber-300 hover:underline break-all" target="_blank"></a>
+            <div class="mt-3 text-xs uppercase text-slate-500 tracking-wider">Or paste in CLI</div>
+            <code id="qr-cli" class="mono text-[10px] text-slate-400 break-all block mt-1"></code>
+          </div>
         </div>
-
-        <template x-if="qrState === 'error'">
-          <div class="mt-4 p-3 bg-rose-950/30 border border-rose-800 rounded text-sm text-rose-300">
-            <div class="font-medium">Error: <span x-text="qrError"></span></div>
-            <div class="mt-2 text-xs text-rose-400/80">HTTP <span x-text="qrDebug.status || '—'"></span> · <span x-text="qrDebug.detail || ''"></span></div>
-          </div>
-        </template>
-
-        <template x-if="qrState === 'ready'">
-          <div class="mt-4 p-4 bg-slate-950 border border-slate-800 rounded flex items-center gap-6">
-            <img :src="qr" class="w-40 h-40 rounded bg-white p-2" alt="QR code" />
-            <div class="flex-1 min-w-0">
-              <div class="text-xs uppercase text-slate-500 tracking-wider">PIN</div>
-              <div class="mono text-3xl tracking-widest text-amber-400" x-text="pin"></div>
-              <div class="mono text-xs text-slate-500 mt-1">expires in <span x-text="pinCountdown"></span>s</div>
-
-              <div class="mt-4 text-xs uppercase text-slate-500 tracking-wider">Scan from phone</div>
-              <a class="mono text-xs text-amber-300 hover:underline break-all"
-                 :href="qrUrl" x-text="qrUrl" target="_blank"></a>
-
-              <div class="mt-3 text-xs uppercase text-slate-500 tracking-wider">Or paste in CLI</div>
-              <code class="mono text-[10px] text-slate-400 break-all block mt-1"
-                    x-text="`node client-desktop/src/register.js --qr '${qrPayload}'`"></code>
-            </div>
-          </div>
-        </template>
       </div>
+      <script>
+        (() => {
+          const $ = (id) => document.getElementById(id);
+          const btn   = $('qr-btn');
+          const errEl = $('qr-error');
+          const resEl = $('qr-result');
+          let countdownTimer = null;
+
+          function showError(msg, status, detail) {
+            resEl.style.display = 'none';
+            errEl.style.display = 'block';
+            errEl.innerHTML =
+              '<div class="font-medium">Error: ' + msg + '</div>' +
+              (status || detail ? '<div class="mt-2 text-xs text-rose-400/80">HTTP ' + (status || '—') + ' · ' + (detail || '').replace(/[<>]/g,'') + '</div>' : '');
+          }
+          function showResult(r) {
+            errEl.style.display = 'none';
+            resEl.style.display = 'flex';
+            $('qr-img').src   = r.qr;
+            $('qr-pin').textContent  = r.pin;
+            $('qr-url').href  = r.url;
+            $('qr-url').textContent = r.url;
+            $('qr-cli').textContent = "node client-desktop/src/register.js --qr '" + r.payload + "'";
+            const exp = r.expiresAt;
+            if (countdownTimer) clearInterval(countdownTimer);
+            countdownTimer = setInterval(() => {
+              const left = Math.max(0, Math.floor((exp - Date.now()) / 1000));
+              $('qr-countdown').textContent = left;
+              if (left === 0) { clearInterval(countdownTimer); resEl.style.display = 'none'; }
+            }, 500);
+          }
+
+          btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            btn.textContent = 'generating…';
+            errEl.style.display = 'none';
+            resEl.style.display = 'none';
+            try {
+              const res = await fetch('/api/qr', { credentials: 'include', cache: 'no-store' });
+              if (!res.ok) {
+                let body = '';
+                try { body = await res.text(); } catch {}
+                showError('HTTP ' + res.status, res.status, body.slice(0, 200));
+                if (res.status === 401) setTimeout(() => location.reload(), 2000);
+                return;
+              }
+              const r = await res.json();
+              if (!r.qr || !r.pin || !r.url) {
+                showError('respuesta incompleta', res.status, 'keys: ' + Object.keys(r).join(','));
+                return;
+              }
+              showResult(r);
+            } catch (e) {
+              showError('network error', null, e.message);
+            } finally {
+              btn.disabled = false;
+              btn.textContent = '+ register new device';
+            }
+          });
+        })();
+      </script>
     </section>
 
     <!-- History + Events -->
@@ -367,3 +410,4 @@ function dashboard() {
 
 </body>
 </html>
+<!-- build 1777950160 -->
