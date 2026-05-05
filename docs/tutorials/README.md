@@ -232,6 +232,53 @@ node bin/clipsync stop       # detener todo
 
 ---
 
+## TLS / Certificado del hub (avanzado)
+
+Por defecto el hub genera un **cert self-signed** y los clientes lo fijan vía TOFU pinning. Funciona offline, sin DNS público, sin renovación. Pero el browser muestra "no es seguro" la primera vez.
+
+Si quieres **padlock verde** sin warnings del browser, dos alternativas:
+
+### Opción A: cert externo (cualquier CA)
+
+Drop tu propio par `cert.pem` + `key.pem` en `~/.config/clipsync/hub/tls/`. El hub los detecta y los usa tal cual — nunca los sobreescribe. Sirve para:
+
+- Certs de `certbot` / Let's Encrypt si tienes un dominio que apunta a tu hub
+- Certs de tu CA corporativa
+- Certs de mkcert que generaste a mano
+- Cualquier otra CA
+
+```
+~/.config/clipsync/hub/tls/
+├── cert.pem
+└── key.pem    (mode 0o600)
+```
+
+### Opción B: mkcert (CA local, sin internet)
+
+[mkcert](https://github.com/FiloSottile/mkcert) crea una CA local que se instala en el trust store del SO. Resultado: padlock verde para tu LAN sin exponer nada a internet.
+
+```bash
+# Instalar mkcert (una sola vez)
+brew install mkcert        # macOS
+sudo apt install mkcert    # Ubuntu/Debian
+choco install mkcert       # Windows
+
+# Arrancar el hub con mkcert
+CLIPSYNC_TLS_MODE=mkcert npm start
+```
+
+El hub ejecuta `mkcert -install` automáticamente (instala la CA local) y emite un cert válido para `clipsync.local`, `localhost`, `127.0.0.1` y todas las IPs LAN del hub.
+
+> Para que otros dispositivos (otro Mac, móvil) confíen en esa CA, ejecuta `mkcert -install` también en cada uno (o copia el rootCA.pem desde el primer dispositivo). Sin eso, los demás browsers seguirán pidiendo aceptar excepción.
+
+| Modo | Cuándo usarlo | Padlock verde | Funciona offline |
+|------|---------------|---------------|------------------|
+| Self-signed (default) | LAN privada, devs | ✗ (TOFU pinning) | ✓ |
+| mkcert | LAN privada, padlock verde local | ✓ (en máquinas con CA instalada) | ✓ |
+| Cert externo | Tienes dominio + certbot | ✓ | Solo si el cert no expira |
+
+---
+
 ## Modos de admin (avanzado)
 
 Por defecto el hub usa **token de admin**. Pero puedes elegir otro modo al arrancar:
