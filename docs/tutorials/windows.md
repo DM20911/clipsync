@@ -16,13 +16,27 @@ cd clipsync
 .\scripts\install-win.ps1 -Role client
 ```
 
-El script:
-1. Instala dependencias del cliente desktop
-2. Te ofrece registrar el dispositivo
-3. Registra una tarea programada `ClipSync Client` que arranca al iniciar sesión
-4. La tarea corre con privilegios limitados del usuario (no SYSTEM)
+El instalador pregunta:
 
-> Se necesita Administrador solo para registrar la tarea programada. Una vez creada, corre como tu usuario normal.
+```
+Como quieres correr ClipSync?
+  1) Tray app (recomendado - icono en system tray)
+  2) Daemon (Task Scheduler)
+Modo [1]:
+```
+
+- **Tray** instala Electron + auto-launch. Ícono en system tray.
+- **Daemon** crea tarea programada `ClipSync Client` que arranca al iniciar sesión, sin UI.
+
+> Se necesita Administrador solo para crear la tarea programada (modo daemon). El modo tray no requiere admin.
+
+### Cambiar de modo después
+
+```powershell
+node bin\clipsync switch tray
+node bin\clipsync switch daemon
+node bin\clipsync status
+```
 
 ## Registro inicial
 
@@ -43,7 +57,9 @@ Get-Content "$env:USERPROFILE\.config\clipsync\client\daemon.log" -Wait
 
 ## Auto-start
 
-Ya configurado. Para verificar:
+**Tray mode**: marca "Auto-start at login" en el menú del tray.
+
+**Daemon mode**: ya configurado por el instalador. Para verificar:
 
 ```powershell
 Get-ScheduledTask -TaskName "ClipSync Client"
@@ -52,6 +68,7 @@ Get-ScheduledTask -TaskName "ClipSync Client"
 Para detener:
 
 ```powershell
+node bin\clipsync stop                     # cualquier modo
 Stop-ScheduledTask -TaskName "ClipSync Client"
 Disable-ScheduledTask -TaskName "ClipSync Client"
 ```

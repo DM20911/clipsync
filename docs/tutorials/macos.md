@@ -14,13 +14,29 @@ cd clipsync
 bash scripts/install-mac.sh client
 ```
 
-El script:
-1. Instala dependencias del cliente desktop
-2. Te ofrece registrar el dispositivo de inmediato
-3. Crea el LaunchAgent en `~/Library/LaunchAgents/com.clipsync.client.plist`
-4. Carga el agente — el daemon arranca automáticamente desde ahora
+El instalador pregunta:
 
-> El instalador no requiere `sudo` porque los LaunchAgents de usuario no necesitan privilegios elevados. Si quieres correrlo como servicio del sistema (`/Library/LaunchDaemons`), eso sí pediría sudo.
+```
+Cómo quieres correr ClipSync?
+  1) Tray app (recomendado — ícono en menu bar)
+  2) Daemon en background (sin UI)
+Modo [1]:
+```
+
+- **Tray** instala el motor + Electron (~80 MB primera vez), arranca con ícono en la barra de menú. Activa "Auto-start at login" desde el menú del tray.
+- **Daemon** crea un LaunchAgent en `~/Library/LaunchAgents/com.clipsync.daemon.plist`, sin UI.
+
+> El instalador no requiere `sudo`: ambos modos corren con tu usuario. Si quieres correr el daemon como servicio del sistema (`/Library/LaunchDaemons`), eso sí pediría sudo.
+
+### Cambiar de modo después
+
+```bash
+bin/clipsync switch tray     # de daemon a tray
+bin/clipsync switch daemon   # de tray a daemon
+bin/clipsync status          # ver modo activo
+```
+
+No hay que re-registrar — el `state.json` se mantiene.
 
 ## Registro inicial
 
@@ -46,7 +62,9 @@ tail -f ~/Library/Logs/clipsync-client.log
 
 ## Auto-start
 
-Ya configurado por el instalador. Para verificar:
+**Tray mode**: en el menú del tray, marca "Auto-start at login" (gestionado por `auto-launch` npm).
+
+**Daemon mode**: ya configurado por el instalador. Para verificar:
 
 ```bash
 launchctl list | grep clipsync
@@ -55,7 +73,8 @@ launchctl list | grep clipsync
 Para detener temporalmente:
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.clipsync.client.plist
+bin/clipsync stop                                              # cualquiera
+launchctl unload ~/Library/LaunchAgents/com.clipsync.daemon.plist   # solo daemon
 ```
 
 ## Solución de problemas
@@ -76,12 +95,20 @@ launchctl unload ~/Library/LaunchAgents/com.clipsync.client.plist
 
 ```
 client-desktop/src/
-├── main.js          ← entry, sync loop, envelope encryption
+├── engine.js        ← SyncEngine (núcleo compartido tray ↔ daemon)
+├── main.js          ← entry daemon (CLI thin wrapper)
 ├── ws-client.js     ← WSS + TOFU cert pinning + jittered reconnect
 ├── clipboard.js     ← clipboardy (texto) + osascript (imagen)
 ├── store.js         ← state.json en ~/.config/clipsync/client
+├── lock.js          ← lockfile mutex daemon ↔ tray
 ├── discovery.js     ← mDNS para encontrar el hub
-└── register.js      ← registro inicial vía PIN
+└── register.js      ← registro inicial vía PIN (--qr opcional)
+
+client-tray/         ← Electron menu bar app
+├── src/main.cjs     ← Tray icon + menu, importa engine.js
+└── icons/           ← PNG por estado (connected/disconnected/paused/error)
+
+bin/clipsync         ← CLI unificado (status, switch, register, logs, stop)
 
 shared/
 ├── crypto-node.js   ← X25519, HKDF, AES-256-GCM, randomPin
@@ -124,10 +151,12 @@ Permisos `0o600`. La clave X25519 privada nunca se transmite; solo se usa localm
 ### Desinstalar
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.clipsync.client.plist
-rm ~/Library/LaunchAgents/com.clipsync.client.plist
+bin/clipsync stop
+launchctl unload ~/Library/LaunchAgents/com.clipsync.daemon.plist 2>/dev/null
+rm -f ~/Library/LaunchAgents/com.clipsync.daemon.plist
+rm -f ~/Library/LaunchAgents/com.clipsync.client.plist     # legacy
 rm -rf ~/.config/clipsync
-rm ~/Library/Logs/clipsync-client.*
+rm -f ~/Library/Logs/clipsync-*.log ~/Library/Logs/clipsync-*.err
 ```
 
 ---

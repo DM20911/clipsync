@@ -25,11 +25,27 @@ cd clipsync
 bash scripts/install-linux.sh client
 ```
 
-El script:
-1. Instala dependencias del cliente desktop
-2. Te ofrece registrar el dispositivo
-3. Crea el unit en `~/.config/systemd/user/clipsync-client.service`
-4. Habilita el servicio para que arranque al iniciar sesión
+El instalador pregunta:
+
+```
+Cómo quieres correr ClipSync?
+  1) Tray app (recomendado)
+  2) Daemon en background (systemd)
+Modo [1]:
+```
+
+- **Tray** (Electron + StatusNotifier/AppIndicator): ícono en system tray. Auto-start vía `auto-launch` npm.
+- **Daemon**: systemd user unit en `~/.config/systemd/user/clipsync-client.service`.
+
+> En GNOME 45+ puede que necesites una extensión como AppIndicator Support para ver el ícono del tray. KDE / XFCE / Cinnamon lo soportan nativo.
+
+### Cambiar de modo después
+
+```bash
+bin/clipsync switch tray
+bin/clipsync switch daemon
+bin/clipsync status
+```
 
 ## Registro inicial
 
@@ -50,16 +66,18 @@ journalctl --user -u clipsync-client -f
 
 ## Auto-start
 
+**Tray mode**: marca "Auto-start at login" en el menú del tray.
+
+**Daemon mode**:
 ```bash
 systemctl --user enable clipsync-client       # ya hecho por el instalador
 loginctl enable-linger $USER                  # opcional: corre incluso sin sesión activa
 ```
 
-Para detener:
-
+Para detener cualquier modo:
 ```bash
-systemctl --user stop clipsync-client
-systemctl --user disable clipsync-client
+bin/clipsync stop                             # mata el modo activo
+systemctl --user disable --now clipsync-client    # desinstalar el daemon
 ```
 
 ## Solución de problemas

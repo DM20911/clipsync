@@ -63,6 +63,29 @@ CLIPSYNC_ADMIN_MODE=first-device npm start
 
 Cada dispositivo genera su propio keypair X25519 al registrarse. El hub almacena la clave pública. Al enviar un clip, el dispositivo emisor cifra el contenido con una clave de contenido aleatoria, y envuelve esa clave por destinatario usando ECDH(X25519) + HKDF. **El hub nunca tiene acceso al texto plano.**
 
+## Dos modos de ejecutar el cliente desktop
+
+ClipSync soporta dos modos de funcionamiento que **coexisten** y comparten el mismo registro:
+
+| Modo | Cómo se ve | Cuándo elegir |
+|------|------------|---------------|
+| **Tray** (recomendado) | Ícono en menu bar (macOS) o system tray (Windows/Linux), click → menú con estado, peers, recent clips, pause/resume | Tienes una sesión gráfica y quieres ver qué pasa |
+| **Daemon** | Sin UI, corre como servicio del sistema (launchd/systemd/Task Scheduler) | Servidor headless, NAS, Raspberry Pi |
+
+El instalador pregunta cuál quieres al inicio. Puedes cambiar después sin re-registrar:
+
+```bash
+clipsync switch tray     # cierra daemon, abre tray app
+clipsync switch daemon   # cierra tray, instala servicio
+clipsync status          # qué modo está activo
+clipsync stop            # detener cualquiera
+```
+
+Ambos modos:
+- Comparten `~/.config/clipsync/client/state.json` (JWT, claves X25519, cert FP)
+- Mutual exclusion vía lockfile + single-session enforcement del hub
+- Auto-start al boot (tray usa `auto-launch` npm; daemon usa servicio del SO)
+
 ## Tutoriales por dispositivo
 
 - [macOS](./macos.md)
