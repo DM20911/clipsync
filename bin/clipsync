@@ -62,9 +62,21 @@ function startTray() {
   const trayDir = path.join(ROOT, 'client-tray');
   if (!fs.existsSync(path.join(trayDir, 'node_modules'))) {
     console.log('Installing tray dependencies (first run)…');
-    execSync('npm install', { cwd: trayDir, stdio: 'inherit' });
+    const npmCmd = platform === 'win32' ? 'npm.cmd' : 'npm';
+    execSync(`${npmCmd} install`, { cwd: trayDir, stdio: 'inherit', shell: true });
   }
-  const child = spawn('npx', ['electron', '.'], { cwd: trayDir, detached: true, stdio: 'ignore' });
+  // Resolve electron binary directly from node_modules (cross-platform safe)
+  const electronBin = path.join(
+    trayDir, 'node_modules', '.bin',
+    platform === 'win32' ? 'electron.cmd' : 'electron'
+  );
+  const child = spawn(electronBin, ['.'], {
+    cwd: trayDir,
+    detached: true,
+    stdio: 'ignore',
+    shell: platform === 'win32',  // .cmd needs shell on Windows
+    windowsHide: true,
+  });
   child.unref();
   console.log('Tray started.');
 }
