@@ -364,6 +364,24 @@ if (params.has('share')) {
   if (t) $('compose-text').value = t;
 }
 
+// QR auto-fill: ?reg=<base64-encoded JSON {hub, pin, fp}>
+if (params.has('reg')) {
+  try {
+    const b64 = params.get('reg').replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64 + '=='.slice(0, (4 - b64.length % 4) % 4);
+    const json = atob(padded);
+    const data = JSON.parse(json);
+    if (data.hub) $('hub-url').value = data.hub;
+    if (data.pin) $('pin-input').value = data.pin;
+    if (data.fp) {
+      const note = document.createElement('p');
+      note.className = 'text-xs text-amber-300 mt-2';
+      note.textContent = 'Hub fingerprint: ' + data.fp.slice(0, 32) + '… (compare to browser cert)';
+      $('register-msg').appendChild(note);
+    }
+  } catch {}
+}
+
 state = loadState();
 const guessedUrl = `wss://${location.hostname}:5678`;
 if (!state.jwt) $('hub-url').value = guessedUrl;

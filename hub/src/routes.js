@@ -81,12 +81,18 @@ export class Routes {
 
   #checkOrigin(req, res) {
     const origin = req.headers.origin;
-    if (origin && origin !== this.allowedOrigin && origin !== this.allowedOriginLocal) {
-      res.writeHead(403, { 'content-type': 'text/plain' });
-      res.end('forbidden origin');
-      return false;
-    }
-    return true;
+    if (!origin) return true;
+    try {
+      const u = new URL(origin);
+      // Allow any private-IP origin (already gated by #checkPrivate on connecting IP).
+      // Hostnames like .local (mDNS) are accepted too — the connecting IP must still be private.
+      if (u.protocol === 'https:' && (isPrivateIp(u.hostname) || /\.local$/i.test(u.hostname) || u.hostname === 'localhost')) {
+        return true;
+      }
+    } catch {}
+    res.writeHead(403, { 'content-type': 'text/plain' });
+    res.end('forbidden origin');
+    return false;
   }
 
   #isAdmin(req) {
@@ -243,11 +249,20 @@ export class Routes {
     if (pathname === '/api/qr' && req.method === 'GET') {
       const { pin, expiresAt } = this.auth.issuePin();
       const ip = primaryLanIp();
-      const wssUrl = `wss://${ip}:${CONFIG.PORT_WSS}`;
+      const wssUrl  = `wss://${ip}:${CONFIG.PORT_WSS}`;
+      const httpUrl = `https://${ip}:${CONFIG.PORT_HTTP}`;
       const fp = this.db.getMeta('cert_fingerprint') || '';
       const payload = JSON.stringify({ v: 2, hub: wssUrl, pin, fp });
-      const dataUrl = await QRCode.toDataURL(payload, { errorCorrectionLevel: 'M', margin: 1, scale: 8 });
-      return this.#json(res, 200, { pin, expiresAt, qr: dataUrl, payload, hub: wssUrl, fp });
+      // QR as a URL → opens the PWA with auto-fill via ?reg=<base64-payload>
+      const regParam = Buffer.from(payload).toString('base64url');
+      const qrUrl = `${httpUrl}/?reg=${regParam}`;
+      const dataUrl = await QRCode.toDataURL(qrUrl, { errorCorrectionLevel: 'M', margin: 1, scale: 8 });
+      return this.#json(res, 200, {
+        pin, expiresAt, qr: dataUrl,
+        url: qrUrl,        // what's encoded in the QR (URL-shaped)
+        payload,           // raw JSON (for manual paste in register CLI)
+        hub: wssUrl, fp,
+      });
     }
     if (pathname === '/api/events') {
       res.writeHead(200, {
